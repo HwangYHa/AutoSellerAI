@@ -27,7 +27,43 @@ threads-worker
     +--> Threads API reply
 
 Streamlit :8501  ----> same SQLite DB
+      |
+      +--> Social Commerce / Threads page
 ```
+
+## Streamlit Control Center
+
+`gui/pages/10_Social_Commerce_Threads.py`를 추가했다. Streamlit 멀티페이지 네비게이션에서 Social Commerce / Threads 관리 화면으로 진입할 수 있다.
+
+관리 화면은 다음 7개 탭으로 구성된다.
+
+1. `Dashboard`
+   - 게시물, 댓글, AI 초안, 발행 답글, HOT Lead, 사람 확인 건수
+   - 평균 구매의도, 활성 Rule, 검수/발행 대기 현황
+   - 최근 댓글과 운영 체크
+2. `게시물`
+   - 기존 AutoSellerAI 상품과 Threads 게시물 연결
+   - Campaign Key / CTA 키워드 지정
+   - Threads 실게시 및 게시 이력 조회
+3. `댓글`
+   - Intent / 구매의도 / 사람 확인 여부 필터
+   - 댓글 처리 상태 확인
+4. `HOT Leads`
+   - 구매의도 점수 기준 Lead 우선순위화
+   - HOT / WARM 등급 시각화
+5. `자동화 Rule`
+   - 댓글 키워드 → 고정 답글 Rule 생성
+   - 특정 상품 또는 전체 상품 범위 지정
+   - 우선순위, ON/OFF, 삭제
+6. `AI Sales Inbox`
+   - Rule/AI 답변 초안 검수
+   - 민감 문의 Human Review 표시
+   - 초안 수정/저장
+   - 승인 후 Threads 공개 답글 발행
+7. `Threads 설정`
+   - Threads / Webhook / Redis 환경변수 연결 상태
+   - 자동답글 운영 모드
+   - 필요한 API 권한 안내
 
 ## Safety defaults
 
@@ -66,9 +102,11 @@ THREADS_AUTO_REPLY=true
 docker compose up --build
 ```
 
-- Seller GUI: http://localhost:8501
-- Social API: http://localhost:8000
-- OpenAPI: http://localhost:8000/docs
+- Seller GUI: `http://localhost:8501`
+- Social API: `http://localhost:8000`
+- OpenAPI: `http://localhost:8000/docs`
+
+Streamlit 좌측 멀티페이지 네비게이션에서 `Social Commerce Threads` 페이지로 이동한다.
 
 ## API
 
@@ -140,10 +178,9 @@ Webhook
 
 ## Next implementation priorities
 
-1. Streamlit에 Social Commerce / Threads 화면 추가
-2. Meta OAuth + 장기 토큰 갱신 관리
-3. 이미지/영상 게시 지원
-4. 게시 예약 및 Content AI
-5. tracking redirect + 네이버/쿠팡 주문 attribution
-6. 게시물별 매출/마진 기반 Content Score 학습
-7. SQLite -> PostgreSQL 전환 및 Alembic 도입
+1. Meta OAuth + 장기 토큰 갱신/만료일 관리
+2. 이미지/영상 게시 + 예약 게시
+3. Content AI 상품선정/게시물 초안 생성
+4. tracking redirect + 네이버/쿠팡 주문 attribution
+5. 게시물별 매출/마진 기반 Content Score 학습
+6. SQLite -> PostgreSQL 전환 및 Alembic 도입
