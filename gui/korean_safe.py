@@ -14,7 +14,7 @@ def install_safe_translate() -> None:
     original = korean_runtime.translate_text
     protect = re.compile(
         r"https?://[^\s<>'\"]+"
-        r"|\b[A-Z][A-Z0-9_]{2,}\b"
+        r"|\b(?:[A-Z][A-Z0-9]*_){1,}[A-Z0-9]+\b"
         r"|(?:[A-Za-z]:\\|/)[^\s<>'\"]+"
     )
 
