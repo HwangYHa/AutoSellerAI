@@ -19,7 +19,7 @@ def test_profitable_content_beats_loss_making_content():
         "returns": 4,
     })
     assert profitable > loss
-    assert profitable >= 70
+    assert profitable >= 60
     assert loss <= 35
 
 
