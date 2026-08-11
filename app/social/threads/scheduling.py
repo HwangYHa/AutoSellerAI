@@ -13,6 +13,7 @@ from app.social.threads.auth import credential_status, refresh_stored_credential
 from app.social.threads.client import ThreadsClient
 from app.social.threads.growth_models import ScheduledSocialPost, SocialContentDraft, TrackingLink
 from app.social.threads.models import ThreadsPost
+from app.social.threads.profit_feedback import rebuild_profit_feedback
 from app.social.threads.tracking import attribute_recent_orders
 
 logger = logging.getLogger(__name__)
@@ -125,14 +126,17 @@ def run_scheduler_loop(interval_seconds: int = 20) -> None:
     attr_enabled = os.getenv("ATTRIBUTION_AUTO_ENABLED", "true").lower() == "true"
     attr_every = max(60, int(os.getenv("ATTRIBUTION_RUN_INTERVAL_SECONDS", "300")))
     attr_window = max(1, min(int(os.getenv("ATTRIBUTION_WINDOW_HOURS", "72")), 720))
+    profit_enabled = os.getenv("CONTENT_PROFIT_FEEDBACK_ENABLED", "true").lower() == "true"
+    profit_every = max(300, int(os.getenv("CONTENT_PROFIT_FEEDBACK_INTERVAL_SECONDS", "900")))
     token_every = max(3600, int(os.getenv("THREADS_TOKEN_CHECK_INTERVAL_SECONDS", "21600")))
     token_threshold = max(1, min(int(os.getenv("THREADS_TOKEN_REFRESH_THRESHOLD_DAYS", "7")), 30))
     last_attr = 0.0
+    last_profit = 0.0
     last_token = 0.0
 
     logger.info(
-        "Threads scheduler started interval=%ss attribution=%s/%ss window=%sh token-check=%ss",
-        interval_seconds, attr_enabled, attr_every, attr_window, token_every,
+        "Threads scheduler started interval=%ss attribution=%s/%ss profit-feedback=%s/%ss token-check=%ss",
+        interval_seconds, attr_enabled, attr_every, profit_enabled, profit_every, token_every,
     )
     while True:
         try:
@@ -148,6 +152,14 @@ def run_scheduler_loop(interval_seconds: int = 20) -> None:
                 logger.exception("Threads attribution cycle failed")
             finally:
                 last_attr = now_mono
+
+        if profit_enabled and now_mono - last_profit >= profit_every:
+            try:
+                logger.info("content profit feedback cycle: %s", rebuild_profit_feedback())
+            except Exception:
+                logger.exception("Threads content profit feedback cycle failed")
+            finally:
+                last_profit = now_mono
 
         if now_mono - last_token >= token_every:
             try:
