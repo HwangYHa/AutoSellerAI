@@ -19,61 +19,47 @@ Redis + RQ
 threads-worker
     |
     +--> Rule Engine (키워드/가격/배송/재고)
-    |
     +--> Claude Agent (복잡한 자연어 문의)
-    |
     +--> SQLite (상품 + Threads 이벤트/리드/답글)
-    |
     +--> Threads API reply
 
-Streamlit :8501  ----> same SQLite DB
-      |
-      +--> Social Commerce / Threads page
+threads-scheduler
+    +--> 예약 게시 발행
+    +--> 신규 PlatformOrder Attribution 주기 실행
+
+Streamlit :8501
+    +--> Social Commerce / Threads
+    +--> Threads Growth Automation
 ```
 
 ## Streamlit Control Center
 
-`gui/pages/10_Social_Commerce_Threads.py`를 추가했다. Streamlit 멀티페이지 네비게이션에서 Social Commerce / Threads 관리 화면으로 진입할 수 있다.
+`gui/pages/10_Social_Commerce_Threads.py`
 
-관리 화면은 다음 7개 탭으로 구성된다.
+1. Dashboard
+2. 게시물
+3. 댓글
+4. HOT Leads
+5. 자동화 Rule
+6. AI Sales Inbox
+7. Threads 설정
 
-1. `Dashboard`
-   - 게시물, 댓글, AI 초안, 발행 답글, HOT Lead, 사람 확인 건수
-   - 평균 구매의도, 활성 Rule, 검수/발행 대기 현황
-   - 최근 댓글과 운영 체크
-2. `게시물`
-   - 기존 AutoSellerAI 상품과 Threads 게시물 연결
-   - Campaign Key / CTA 키워드 지정
-   - Threads 실게시 및 게시 이력 조회
-3. `댓글`
-   - Intent / 구매의도 / 사람 확인 여부 필터
-   - 댓글 처리 상태 확인
-4. `HOT Leads`
-   - 구매의도 점수 기준 Lead 우선순위화
-   - HOT / WARM 등급 시각화
-5. `자동화 Rule`
-   - 댓글 키워드 → 고정 답글 Rule 생성
-   - 특정 상품 또는 전체 상품 범위 지정
-   - 우선순위, ON/OFF, 삭제
-6. `AI Sales Inbox`
-   - Rule/AI 답변 초안 검수
-   - 민감 문의 Human Review 표시
-   - 초안 수정/저장
-   - 승인 후 Threads 공개 답글 발행
-7. `Threads 설정`
-   - Threads / Webhook / Redis 환경변수 연결 상태
-   - 자동답글 운영 모드
-   - 필요한 API 권한 안내
+`gui/pages/11_Threads_Growth_Automation.py`
+
+1. AI 콘텐츠 자동 생성
+2. Tracking URL
+3. 게시 예약
+4. 네이버·쿠팡 구매 Attribution
 
 ## Safety defaults
 
-- `THREADS_AUTO_REPLY=false`가 기본값이다. 초기 운영은 AI가 분류/초안을 만들고 사람이 확인한다.
-- 반품/불만은 `requires_human=true`로 강제하여 자동 공개 답글을 보내지 않는다.
+- `THREADS_AUTO_REPLY=false`가 기본값이다.
+- 반품/불만은 `requires_human=true`로 강제한다.
 - 상품 사양은 기존 `products` 테이블의 데이터만 Context로 제공한다.
 - Webhook POST는 `X-Hub-Signature-256` HMAC 검증을 지원한다.
-- Access Token/Secret은 코드나 DB에 넣지 않고 환경변수에서 읽는다.
-- 동일 comment ID는 DB unique key로 중복 처리하지 않는다.
-- Webhook 요청에서 AI/Threads API를 직접 호출하지 않고 Redis Queue로 넘긴 뒤 즉시 응답한다.
+- Access Token/Secret은 환경변수에서 읽는다.
+- Webhook 요청에서 AI/Threads API를 직접 호출하지 않고 Redis Queue로 넘긴다.
+- Tracking 클릭 IP 원문은 저장하지 않고 salted SHA-256 hash만 저장한다.
 
 ## Environment
 
@@ -81,7 +67,7 @@ Streamlit :8501  ----> same SQLite DB
 cp .env.example .env
 ```
 
-필수 설정:
+필수 Threads 설정:
 
 ```text
 THREADS_USER_ID
@@ -90,7 +76,17 @@ THREADS_APP_SECRET
 THREADS_VERIFY_TOKEN
 ```
 
-실제 자동 답글을 켤 때만:
+Growth Automation 설정:
+
+```text
+PUBLIC_BASE_URL=https://seller.example.com
+TRACKING_HASH_SALT=<long-random-secret>
+ATTRIBUTION_WINDOW_HOURS=72
+ATTRIBUTION_AUTO_ENABLED=true
+ATTRIBUTION_RUN_INTERVAL_SECONDS=300
+```
+
+실제 자동 댓글을 켤 때만:
 
 ```text
 THREADS_AUTO_REPLY=true
@@ -106,81 +102,106 @@ docker compose up --build
 - Social API: `http://localhost:8000`
 - OpenAPI: `http://localhost:8000/docs`
 
-Streamlit 좌측 멀티페이지 네비게이션에서 `Social Commerce Threads` 페이지로 이동한다.
+## Threads API
 
-## API
-
-### Threads Webhook verification
+### Webhook verification
 
 `GET /api/v1/threads/webhook`
 
-Meta의 `hub.mode`, `hub.verify_token`, `hub.challenge` 파라미터를 처리한다.
-
-### Threads Webhook receiver
+### Webhook receiver
 
 `POST /api/v1/threads/webhook`
-
-이벤트를 검증한 뒤 RQ `threads` queue에 적재한다.
 
 ### Publish
 
 `POST /api/v1/threads/posts`
 
-```json
-{
-  "text": "차량 청소할 때 시트 사이가 제일 귀찮더라고요. 궁금하면 청소기라고 남겨주세요.",
-  "product_id": 381,
-  "campaign_key": "car-cleaning-202608",
-  "cta_keyword": "청소기"
-}
-```
-
 ### Automation rule
 
 `POST /api/v1/threads/rules`
 
-```json
-{
-  "keyword": "청소기",
-  "reply_template": "말씀드린 제품 정보는 판매 페이지에서 확인하실 수 있어요.",
-  "product_id": 381,
-  "priority": 10,
-  "enabled": true
-}
-```
-
-### Sales Inbox data
+### Sales Inbox
 
 - `GET /api/v1/threads/comments`
 - `GET /api/v1/threads/leads?min_score=0.7`
 
-## Data model
+## Growth Automation API
 
-- `threads_posts`: Threads 게시물과 내부 상품 연결
-- `threads_comments`: 댓글, intent, 구매의도 점수, 사람 개입 여부
-- `threads_replies`: AI/규칙/사람 답글 및 발행 상태
-- `threads_automation_rules`: 키워드 CTA 규칙
+### AI Content
 
-## Processing policy
+`POST /api/v1/threads/content/generate`
+
+상품 DB 기반으로 Threads 후보 콘텐츠를 생성하고 `social_content_drafts`에 저장한다.
+
+### Tracking URL
+
+`POST /api/v1/threads/tracking-links`
+
+공개 URL:
 
 ```text
-Webhook
-  -> idempotency check
-  -> post/product context
-  -> keyword rule first
-  -> rule intent classifier
-  -> Claude only when useful
-  -> policy filter
-  -> human_review OR Threads API reply
+GET /t/{code}
 ```
 
-키워드 CTA처럼 확정적인 댓글은 규칙 엔진이 처리한다. 반품/불만은 사람이 처리한다. 그 외 자연어 상품문의는 Claude가 기존 상품 DB 범위 안에서 답변 초안을 만든다.
+클릭 기록 후 실제 SmartStore/Coupang URL로 302 redirect한다.
+
+### Schedule
+
+```text
+POST /api/v1/threads/schedules
+GET  /api/v1/threads/schedules
+```
+
+DB에는 UTC로 저장하고 GUI에서는 KST로 변환한다.
+
+### Attribution
+
+```text
+POST /api/v1/attribution/run
+GET  /api/v1/attribution
+```
+
+실제 주문 원천은 기존 `platform_orders` 테이블이다. 외부 마켓 주문 API는 AutoSellerAI의 click_id를 반환하지 않으므로 자동 귀속은 상품·플랫폼·클릭 이후 주문시간을 이용한 probabilistic 방식이다. 운영자가 검증한 결과는 deterministic으로 승격한다.
+
+상세 내용: `docs/THREADS_GROWTH_AUTOMATION.md`
+
+## Core data model
+
+Threads Sales:
+
+- `threads_posts`
+- `threads_comments`
+- `threads_replies`
+- `threads_automation_rules`
+
+Growth:
+
+- `social_content_drafts`
+- `scheduled_social_posts`
+- `tracking_links`
+- `tracking_clicks`
+- `order_attributions`
+
+## Closed-loop
+
+```text
+상품 DB
+ -> AI 콘텐츠
+ -> Tracking URL
+ -> 예약 게시
+ -> Threads
+ -> 클릭
+ -> SmartStore/Coupang
+ -> 실제 PlatformOrder
+ -> Attribution confidence
+ -> 운영자 확정
+ -> 캠페인 매출 데이터
+```
 
 ## Next implementation priorities
 
 1. Meta OAuth + 장기 토큰 갱신/만료일 관리
-2. 이미지/영상 게시 + 예약 게시
-3. Content AI 상품선정/게시물 초안 생성
-4. tracking redirect + 네이버/쿠팡 주문 attribution
-5. 게시물별 매출/마진 기반 Content Score 학습
-6. SQLite -> PostgreSQL 전환 및 Alembic 도입
+2. 이미지/영상 게시
+3. 주문 취소/반품 발생 시 Attribution 매출 차감
+4. 콘텐츠 성과와 실제 순마진 feedback loop
+5. SQLite -> PostgreSQL 전환 및 Alembic 도입
