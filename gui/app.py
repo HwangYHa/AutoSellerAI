@@ -45,8 +45,9 @@ st.sidebar.page_link("pages/00_AutoSeller_Main.py", label="통합 운영 화면"
 st.sidebar.markdown("### 🛒 소셜커머스")
 st.sidebar.page_link("pages/10_Social_Commerce_Threads.py", label="Threads", icon="🧵")
 st.sidebar.page_link("pages/11_Threads_Growth_Automation.py", label="Growth Automation", icon="📈")
+st.sidebar.page_link("pages/12_Threads_Profit_Intelligence.py", label="Profit Intelligence", icon="💹")
 st.sidebar.markdown("---")
-st.sidebar.caption("Threads: 콘텐츠 → 게시 → 댓글 영업 → 클릭 → 구매 귀속")
+st.sidebar.caption("Threads: 콘텐츠 → 게시 → 댓글 영업 → 클릭 → 구매 귀속 → 순이익 학습")
 
 left, right = st.columns(2, gap="large")
 with left:
@@ -54,16 +55,17 @@ with left:
     st.page_link("pages/00_AutoSeller_Main.py", label="통합 운영 화면 열기", icon="➡️", use_container_width=True)
 
 with right:
-    st.markdown('<div class="area"><h3>🛒 소셜커머스 → Threads</h3><div class="muted">Dashboard · 콘텐츠 · 게시물 · 댓글 · HOT Leads · AI Sales Inbox · 자동화 · API 설정을 관리합니다.</div></div>', unsafe_allow_html=True)
+    st.markdown('<div class="area"><h3>🛒 소셜커머스 → Threads</h3><div class="muted">Dashboard · 콘텐츠 · 게시물 · 댓글 · HOT Leads · AI Sales Inbox · 자동화 · API 설정과 순이익 기반 학습을 관리합니다.</div></div>', unsafe_allow_html=True)
     st.page_link("pages/10_Social_Commerce_Threads.py", label="Threads Control Center", icon="🧵", use_container_width=True)
     st.page_link("pages/11_Threads_Growth_Automation.py", label="AI 콘텐츠·예약·Tracking·Attribution", icon="📈", use_container_width=True)
+    st.page_link("pages/12_Threads_Profit_Intelligence.py", label="게시물·캠페인 순이익 / Content Score", icon="💹", use_container_width=True)
 
 st.markdown("### 🚦 Threads 자동화 단계")
-steps = st.columns(5)
+steps = st.columns(6)
 for col, title, desc in zip(
     steps,
-    ["1. API 연결", "2. AI 콘텐츠", "3. 예약·미디어", "4. AI 영업", "5. 구매 귀속"],
-    ["Meta OAuth / 60일 토큰", "상품 DB 기반 생성", "텍스트·이미지·영상", "댓글 분류·답글", "SmartStore·Coupang"],
+    ["1. API 연결", "2. AI 콘텐츠", "3. 예약·미디어", "4. AI 영업", "5. 구매 귀속", "6. 순이익 학습"],
+    ["Meta OAuth / 60일 토큰", "상품 DB 기반 생성", "텍스트·이미지·영상", "댓글 분류·답글", "SmartStore·Coupang", "Content Score → 다음 전략"],
 ):
     with col:
         st.markdown(f"**{title}**")
