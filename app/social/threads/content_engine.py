@@ -5,6 +5,11 @@ import re
 from typing import Any
 
 from app.config import get_settings
+from app.social.threads.search_optimization import (
+    build_search_context,
+    fallback_optimized_body,
+    optimization_scores,
+)
 
 
 ANGLES = {
@@ -38,6 +43,7 @@ def generate_threads_content(product: dict[str, Any], angle: str = "problem_solu
 
     count = max(1, min(int(count), 5))
     settings = get_settings()
+    search_ctx = build_search_context(product)
 
     feedback_text = "실적 데이터 없음"
     if performance_context:
@@ -55,14 +61,29 @@ def generate_threads_content(product: dict[str, Any], angle: str = "problem_solu
         try:
             import anthropic
             client = anthropic.Anthropic(api_key=settings.claude_api_key)
-            prompt = f"""당신은 한국 이커머스 Threads 콘텐츠 에디터입니다.
-목표는 조회수 최대화가 아니라 **실제 귀속 순이익 최대화**입니다.
+            prompt = f"""당신은 한국 이커머스 Threads 광고 콘텐츠 에디터입니다.
+목표는 조회수 최대화가 아니라 **실제 귀속 순이익 최대화 + SEO/GEO/AEO 동시 최적화**입니다.
 광고문구처럼 밀어붙이지 말고 정보/공감형 콘텐츠를 작성하세요.
 상품 DB에 없는 성능, 인증, 배송일, 할인율, 최저가를 추측하거나 만들지 마세요.
 본문은 500자 이하, 과장표현·허위후기·가짜 사용경험 금지입니다.
-CTA는 자연스럽게 댓글 참여를 유도하되 스팸성 반복을 피하세요.
+
+[SEO]
+- 핵심 검색어를 첫 1~2문장 안에 자연스럽게 사용합니다.
+- 키워드 나열 대신 검색 의도에 맞는 문장을 만듭니다.
+- 상품명·카테고리·브랜드를 검색 가능한 표현으로 연결합니다.
+
+[GEO]
+- ChatGPT/Gemini/Perplexity 같은 AI가 인용·추천하기 쉬운 명확한 사실 문장을 포함합니다.
+- 상품 DB에 존재하는 엔티티와 사실만 사용합니다.
+- 무엇인지, 누구에게 필요한지, 무엇을 비교해야 하는지 한 문장씩 명확히 씁니다.
+
+[AEO]
+- 실제 구매자가 검색/질문할 법한 질문을 최소 1개 포함합니다.
+- 질문 직후 핵심 답변을 먼저 제시합니다.
+- FAQ처럼 독립적으로 이해 가능한 짧은 답변 구조를 사용합니다.
 
 상품정보(JSON): {json.dumps(product, ensure_ascii=False)}
+검색최적화 컨텍스트(JSON): {json.dumps(search_ctx, ensure_ascii=False)}
 수익성 피드백(JSON): {feedback_text}
 콘텐츠 각도: {ANGLES[angle]}
 CTA 키워드: {cta_keyword or '상품명에서 자연스럽게 1개 생성'}
@@ -72,11 +93,11 @@ CTA 키워드: {cta_keyword or '상품명에서 자연스럽게 1개 생성'}
 순이익이 음수이거나 반품률이 높은 패턴은 모방하지 마세요. 표본이 적으면 과적합하지 마세요.
 
 JSON 배열만 반환하세요.
-각 항목: {{"body":"...","cta_keyword":"...","score":0~100,"reason":"수익성 근거를 포함한 짧은 이유"}}
+각 항목: {{"body":"...","cta_keyword":"...","score":0~100,"reason":"..."}}
 """
             msg = client.messages.create(
                 model=settings.claude_model,
-                max_tokens=1800,
+                max_tokens=2200,
                 messages=[{"role": "user", "content": prompt}],
             )
             raw = msg.content[0].text.strip()
@@ -90,6 +111,7 @@ JSON 배열만 반환하세요.
                         continue
                     keyword = str(row.get("cta_keyword", cta_keyword)).strip()[:100]
                     score = float(row.get("score", 70))
+                    search_scores = optimization_scores(body, search_ctx)
                     result.append({
                         "body": body,
                         "cta_keyword": keyword,
@@ -97,6 +119,10 @@ JSON 배열만 반환하세요.
                         "reason": str(row.get("reason", "AI 생성"))[:240],
                         "source": "ai_profit_feedback" if performance_context else "ai",
                         "selected_angle": angle,
+                        "primary_keyword": search_ctx["primary_keyword"],
+                        "related_keywords": search_ctx["related_keywords"],
+                        "faq_question": search_ctx["faq_question"],
+                        **search_scores,
                     })
                 if result:
                     return result
@@ -108,42 +134,34 @@ JSON 배열만 반환하세요.
 
 def _fallback_variants(product: dict[str, Any], angle: str, cta_keyword: str, count: int,
                        feedback_used: bool = False) -> list[dict[str, Any]]:
+    base_body, search_ctx = fallback_optimized_body(product, cta_keyword)
+    keyword = cta_keyword.strip() or _keyword_from_name(str(product.get("name") or "이 상품"))
     name = str(product.get("name") or "이 상품")
-    category = str(product.get("category") or "생활")
-    keyword = cta_keyword.strip() or _keyword_from_name(name)
-    templates = {
-        "problem_solution": [
-            f"{category} 제품 고를 때 의외로 놓치기 쉬운 게 있습니다. 기능이 많아 보여도 실제 사용 상황에 맞는지가 더 중요하더라고요. 지금 비교 중인 제품은 ‘{name}’입니다. 궁금한 점이 있으면 ‘{keyword}’라고 댓글 남겨주세요.",
-            f"비슷한 제품이 많을수록 가격만 보고 고르기 어려워집니다. 먼저 사용 목적과 옵션을 확인해보세요. 현재 확인 중인 제품은 {name}입니다. 정보가 필요하면 댓글에 ‘{keyword}’라고 남겨주세요.",
-        ],
-        "experience": [
-            f"상품을 볼 때 이름보다 ‘실제로 언제 쓰게 될까’를 먼저 생각해보게 됩니다. {name}도 그런 관점에서 보고 있어요. 스펙과 판매정보가 궁금하면 ‘{keyword}’라고 남겨주세요.",
-            f"{category} 제품은 화려한 문구보다 기본 정보가 정확한 게 더 중요합니다. {name} 정보가 궁금하면 ‘{keyword}’라고 댓글 주세요.",
-        ],
-        "question": [
-            f"{category} 제품 살 때 가격, 디자인, 사용편의 중 어떤 걸 먼저 보세요? 지금 {name}을 비교 중인데, 상세 정보가 궁금하면 ‘{keyword}’라고 남겨주세요.",
-            f"비슷한 상품이 여러 개면 어떤 기준으로 고르시나요? {name} 관련 정보를 정리하고 있습니다. 필요하면 ‘{keyword}’라고 남겨주세요.",
-        ],
-        "comparison": [
-            f"싼 제품 하나를 바로 고르는 것 vs 용도에 맞는지 먼저 확인하는 것. 지금 비교 중인 제품은 {name}. 정보가 필요하면 ‘{keyword}’라고 남겨주세요.",
-            f"‘가격만 낮은 제품’과 ‘필요한 조건이 맞는 제품’은 다릅니다. {name}을 기준으로 체크 중입니다. 궁금하면 ‘{keyword}’라고 댓글 주세요.",
-        ],
-        "listicle": [
-            f"{category} 제품 고를 때 체크할 것 3가지. 1) 실제 사용 목적 2) 옵션/규격 3) 최종 결제조건. {name}도 같은 기준으로 보고 있습니다. 정보가 필요하면 ‘{keyword}’라고 남겨주세요.",
-            f"구매 전에 확인하면 좋은 것: 가격, 옵션, 사용환경, 배송조건. {name} 관련 정보도 이 기준으로 정리 중입니다. 궁금하면 ‘{keyword}’라고 댓글 주세요.",
-        ],
-    }
-    rows = templates.get(angle, templates["problem_solution"])
+    category = str(product.get("category") or "제품")
+
+    angle_prefix = {
+        "problem_solution": f"{category} 제품을 고를 때 가장 먼저 해결해야 할 건 ‘내 사용 목적에 맞는가’입니다. ",
+        "experience": f"{category} 제품을 비교할 때 광고 문구보다 실제 확인 가능한 정보를 먼저 보게 됩니다. ",
+        "question": f"{category} 제품, 무엇을 기준으로 고르시나요? ",
+        "comparison": f"가격만 낮은 제품과 용도에 맞는 제품 중 무엇이 더 중요한지 비교해보세요. ",
+        "listicle": f"{category} 구매 전 체크 3가지: 사용 목적, 옵션·규격, 최종 판매조건. ",
+    }.get(angle, "")
+
     result = []
-    while len(result) < count:
-        body = rows[len(result) % len(rows)][:500]
+    for i in range(count):
+        body = (angle_prefix + base_body)[:500] if i == 0 else base_body[:500]
+        search_scores = optimization_scores(body, search_ctx)
         result.append({
             "body": body,
             "cta_keyword": keyword,
-            "score": 68.0 if feedback_used else 65.0,
-            "reason": "수익성 전략 프로필 기반 안전 초안" if feedback_used else "규칙 기반 안전 초안",
+            "score": 70.0 if feedback_used else 67.0,
+            "reason": "순이익 전략 + SEO/GEO/AEO 안전 초안" if feedback_used else "SEO/GEO/AEO 규칙 기반 안전 초안",
             "source": "rule_profit_feedback" if feedback_used else "rule",
             "selected_angle": angle,
+            "primary_keyword": search_ctx["primary_keyword"],
+            "related_keywords": search_ctx["related_keywords"],
+            "faq_question": search_ctx["faq_question"],
+            **search_scores,
         })
     return result
 
