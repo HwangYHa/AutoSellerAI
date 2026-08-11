@@ -34,19 +34,19 @@ def build_search_context(product: dict[str, Any]) -> dict[str, Any]:
         entity_facts.append(f"카테고리: {category}")
     if brand:
         entity_facts.append(f"브랜드: {brand}")
-    if origin:
-        entity_facts.append(f"원산지: {origin}")
-    if material:
-        entity_facts.append(f"소재: {material}")
     if product.get("sell_price") not in (None, "", 0, 0.0):
         try:
             entity_facts.append(f"판매가: {float(product['sell_price']):,.0f}원")
         except (TypeError, ValueError):
             pass
+    if origin:
+        entity_facts.append(f"원산지: {origin}")
+    if material:
+        entity_facts.append(f"소재: {material}")
 
     faq_question = (
-        f"{primary_keyword}을 고를 때 무엇을 확인해야 하나요?"
-        if primary_keyword else "이 상품을 고를 때 무엇을 확인해야 하나요?"
+        f"{primary_keyword} 구매할 때 무엇을 확인해야 하나요?"
+        if primary_keyword else "이 상품을 구매할 때 무엇을 확인해야 하나요?"
     )
 
     return {
@@ -80,7 +80,9 @@ def fallback_optimized_body(product: dict[str, Any], cta_keyword: str = "") -> t
     category = str(product.get("category") or "제품")
     keyword = cta_keyword.strip() or (_clean_words(name)[0] if _clean_words(name) else "정보")
 
-    facts = ctx["entity_facts"][:2]
+    # 스레드 본문은 짧게 유지하되, 가격이 실제 DB에 있으면 반드시 노출한다.
+    # SEO/GEO에서 중요한 카테고리·브랜드·가격을 우선하고 이후 사실은 길이에 따라 생략한다.
+    facts = ctx["entity_facts"][:3]
     fact_sentence = " · ".join(facts)
     body = (
         f"{primary} 찾고 계신가요? {category} 제품은 가격만 보기보다 실제 사용 목적과 옵션을 먼저 확인하는 게 좋습니다. "
