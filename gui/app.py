@@ -4,8 +4,17 @@
 """
 from __future__ import annotations
 
+import os
+import sys
+
+# `streamlit run gui/app.py`로 직접 실행해도 프로젝트 루트 패키지를 찾도록 보장한다.
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 import streamlit as st
 
+from gui.help_center import render_process_overview, render_sidebar_help
 from gui.korean_runtime import apply_korean_patch
 
 apply_korean_patch()
@@ -49,11 +58,32 @@ st.sidebar.markdown("### 🛒 소셜커머스")
 st.sidebar.page_link("pages/10_Social_Commerce_Threads.py", label="스레드 운영센터", icon="🧵")
 st.sidebar.page_link("pages/11_Threads_Growth_Automation.py", label="성장 자동화", icon="📈")
 st.sidebar.page_link("pages/12_Threads_Profit_Intelligence.py", label="수익 인텔리전스", icon="💹")
-st.sidebar.markdown("### 📘 도움말")
-st.sidebar.page_link("pages/90_사용자_매뉴얼.py", label="사용자 매뉴얼", icon="📘")
+st.sidebar.markdown("---")
+render_sidebar_help()
 st.sidebar.markdown("---")
 st.sidebar.caption("스레드: 콘텐츠 → 게시 → 댓글 영업 → 클릭 → 구매 귀속 → 순이익 학습")
 
+render_process_overview(expanded=True)
+
+st.markdown("### 🚀 어디서 시작하면 되나요?")
+start1, start2, start3 = st.columns(3)
+with start1:
+    with st.container(border=True):
+        st.markdown("#### ① 처음 설정")
+        st.write("판매채널·공급처·AI·스레드 인증정보를 먼저 준비합니다.")
+        st.page_link("pages/90_사용자_매뉴얼.py", label="초기 설정 방법", icon="🔐", use_container_width=True)
+with start2:
+    with st.container(border=True):
+        st.markdown("#### ② 상품 판매 운영")
+        st.write("상품 수집 → 선별 → 검색 최적화 → 등록 → 주문·배송·정산을 진행합니다.")
+        st.page_link("pages/00_AutoSeller_Main.py", label="통합 운영 시작", icon="⚡", use_container_width=True)
+with start3:
+    with st.container(border=True):
+        st.markdown("#### ③ 소셜 판매 자동화")
+        st.write("상품 등록 후 스레드 콘텐츠·댓글 영업·구매 귀속·수익 학습을 연결합니다.")
+        st.page_link("pages/10_Social_Commerce_Threads.py", label="스레드 운영 시작", icon="🧵", use_container_width=True)
+
+st.markdown("### 🧩 주요 기능")
 left, right = st.columns(2, gap="large")
 with left:
     st.markdown('<div class="area"><h3>⚡ 통합 운영</h3><div class="muted">오토셀러AI의 대시보드, 파이프라인, 상품, 검색 최적화, 주문, 정산, 재고, 알림, 스케줄러, 설정을 사용합니다.</div></div>', unsafe_allow_html=True)
