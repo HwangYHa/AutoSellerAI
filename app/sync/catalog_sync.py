@@ -1,18 +1,22 @@
-"""플랫폼에 이미 등록된 상품을 로컬 DB(products/listings)로 가져오는 동기화.
+"""판매채널에 이미 등록된 상품을 로컬 DB로 역동기화한다.
 
-이 앱을 통하지 않고 쿠팡 Wing/스마트스토어 판매자센터에서 직접 등록한 상품은
-로컬 DB가 전혀 알지 못한다 — SEO 최적화를 포함한 모든 기능이 이 앱으로 등록한
-상품만 대상으로 동작하는 이유. 이 모듈은 각 플랫폼의 "내 상품 목록" API를 읽어
-DB에 없는 상품을 채워 넣는다. **플랫폼에는 아무것도 쓰지 않는다 (읽기 전용).**
+AutoSellerAI를 통하지 않고 쿠팡 Wing 또는 네이버 스마트스토어 판매자센터에서
+직접 등록/수정한 상품도 내부 상품관리·SEO 기능에서 사용할 수 있도록 읽어 온다.
+플랫폼에는 쓰기 작업을 하지 않는다.
 
-매칭 규칙:
-1. 이미 동일 platform_id로 연결된 Listing이 있으면 스킵
-2. `IMPORT-{platform}-{platform_id}` sku로 이전에 가져온 적이 있으면 그 Product에 연결
-3. 이름이 정규화 기준으로 동일하고 해당 플랫폼에 아직 연결되지 않은 로컬 Product가 있으면 연결
-4. 위 조건에 모두 해당하지 않으면 새 Product(source=f"{platform}_import")를 생성
+동기화 원칙
+1. 동일 platform/platform_id Listing이 있으면 외부 상품명·판매가 등 변경사항을 갱신한다.
+2. Listing은 없지만 IMPORT-{platform}-{platform_id} 상품이 있으면 다시 연결한다.
+3. 이름이 같은 로컬 상품이 있고 해당 플랫폼 Listing이 없으면 그 상품에 연결한다.
+4. 나머지는 source={platform}_import 신규 Product로 만든다.
 """
 from __future__ import annotations
+
+import json
 import logging
+from typing import Any
+
+import httpx
 
 from app.db import Listing, Product, get_db
 from app.seo.duplicate_detector import _normalize
@@ -20,8 +24,22 @@ from app.seo.duplicate_detector import _normalize
 logger = logging.getLogger(__name__)
 
 
-def _find_or_link_product(db, platform: str, platform_id: str, name: str, price: float) -> tuple[Product, bool]:
-    """Returns: (product, created) — created=True면 새 Product를 만든 것."""
+def _number(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _find_or_link_product(
+    db,
+    platform: str,
+    platform_id: str,
+    item: dict,
+) -> tuple[Product, bool]:
+    """Returns (product, created)."""
+    name = str(item.get("name", "") or "").strip()
+    price = _number(item.get("price"))
     sku = f"IMPORT-{platform}-{platform_id}"[:120]
 
     existing = db.query(Product).filter_by(sku=sku).first()
@@ -29,80 +47,301 @@ def _find_or_link_product(db, platform: str, platform_id: str, name: str, price:
         return existing, False
 
     target_key = _normalize(name)[:30]
-    for candidate in db.query(Product).all():
-        if _normalize(candidate.name)[:30] != target_key:
-            continue
-        already_linked = db.query(Listing).filter_by(
-            product_id=candidate.id, platform=platform, status="success"
-        ).first()
-        if not already_linked:
-            return candidate, False
+    if target_key:
+        for candidate in db.query(Product).all():
+            if _normalize(candidate.name)[:30] != target_key:
+                continue
+            already_linked = db.query(Listing).filter_by(
+                product_id=candidate.id, platform=platform, status="success"
+            ).first()
+            if not already_linked:
+                return candidate, False
 
+    image = str(item.get("image", "") or "").strip()
     product = Product(
-        sku=sku, source=f"{platform}_import", source_id=platform_id,
-        name=name[:300], supply_price=0.0, sell_price=price or 0.0,
-        category="", status="listed",
+        sku=sku,
+        source=f"{platform}_import",
+        source_id=platform_id,
+        name=name[:300],
+        supply_price=0.0,
+        sell_price=price,
+        category=str(item.get("category", "") or "")[:200],
+        brand=str(item.get("brand", "") or "")[:120],
+        images=json.dumps([image] if image else [], ensure_ascii=False),
+        status="listed",
     )
     db.add(product)
     db.flush()
     return product, True
 
 
-def _sync(platform: str, items: list[dict], id_key: str, name_key: str, price_key: str) -> dict:
-    created, linked, skipped = 0, 0, 0
+def _apply_external_fields(product: Product, item: dict) -> bool:
+    """판매자센터에서 바뀐 사용자 노출 필드를 로컬 Product에 반영한다."""
+    changed = False
+
+    name = str(item.get("name", "") or "").strip()
+    if name and product.name != name[:300]:
+        product.name = name[:300]
+        changed = True
+
+    price = _number(item.get("price"))
+    if price > 0 and abs(float(product.sell_price or 0) - price) > 0.01:
+        product.sell_price = price
+        changed = True
+
+    category = str(item.get("category", "") or "").strip()
+    if category and product.category != category[:200]:
+        product.category = category[:200]
+        changed = True
+
+    brand = str(item.get("brand", "") or "").strip()
+    if brand and product.brand != brand[:120]:
+        product.brand = brand[:120]
+        changed = True
+
+    image = str(item.get("image", "") or "").strip()
+    if image:
+        images_json = json.dumps([image], ensure_ascii=False)
+        if product.images != images_json:
+            product.images = images_json
+            changed = True
+
+    if product.status != "listed":
+        product.status = "listed"
+        changed = True
+
+    return changed
+
+
+def _sync(platform: str, items: list[dict]) -> dict:
+    created = linked = updated = skipped = 0
+
     with get_db() as db:
         for item in items:
-            platform_id = str(item.get(id_key, "") or "")
-            name = item.get(name_key, "") or ""
+            platform_id = str(item.get("platform_id", "") or "").strip()
+            name = str(item.get("name", "") or "").strip()
             if not platform_id or not name:
                 skipped += 1
                 continue
 
-            already = db.query(Listing).filter_by(
-                platform=platform, platform_id=platform_id, status="success"
+            listing = db.query(Listing).filter_by(
+                platform=platform, platform_id=platform_id
             ).first()
-            if already:
-                skipped += 1
+
+            if listing:
+                product = db.query(Product).filter_by(id=listing.product_id).first()
+                changed = False
+                if product:
+                    changed = _apply_external_fields(product, item)
+                if listing.status != "success" or listing.error:
+                    listing.status = "success"
+                    listing.error = ""
+                    changed = True
+                if changed:
+                    updated += 1
+                else:
+                    skipped += 1
                 continue
 
-            price = float(item.get(price_key, 0) or 0)
-            product, was_created = _find_or_link_product(db, platform, platform_id, name, price)
-            db.add(Listing(product_id=product.id, platform=platform,
-                           platform_id=platform_id, status="success"))
+            product, was_created = _find_or_link_product(db, platform, platform_id, item)
+            _apply_external_fields(product, item)
+            db.add(Listing(
+                product_id=product.id,
+                platform=platform,
+                platform_id=platform_id,
+                status="success",
+            ))
             if was_created:
                 created += 1
             else:
                 linked += 1
+
         db.commit()
 
-    return {"ok": True, "total_found": len(items), "created": created,
-            "linked": linked, "skipped": skipped}
+    return {
+        "ok": True,
+        "total_found": len(items),
+        "created": created,
+        "linked": linked,
+        "updated": updated,
+        "skipped": skipped,
+    }
+
+
+def _coupang_catalog_items() -> list[dict]:
+    """쿠팡 목록 API + 상세 API로 상품명/가격/대표이미지를 읽는다."""
+    from app.platforms.coupang import get_coupang_uploader
+
+    uploader = get_coupang_uploader()
+    summaries = uploader.list_seller_products(max_pages=20, page_size=100)
+    results: list[dict] = []
+
+    for summary in summaries:
+        seller_id = str(summary.get("sellerProductId", "") or "").strip()
+        if not seller_id:
+            continue
+
+        detail: dict = {}
+        try:
+            detail = uploader.get_seller_product(seller_id) or {}
+        except Exception as exc:
+            # 목록 자체는 성공했으므로 한 상품 상세 실패 때문에 전체 동기화를 중단하지 않는다.
+            logger.warning("쿠팡 상품 상세 조회 실패 [%s]: %s", seller_id, exc)
+
+        items = detail.get("items") or []
+        prices = [_number(x.get("salePrice")) for x in items if _number(x.get("salePrice")) > 0]
+        price = min(prices) if prices else 0.0
+
+        image = ""
+        for option in items:
+            for img in option.get("images") or []:
+                image = str(img.get("vendorPath") or img.get("cdnPath") or "")
+                if image:
+                    break
+            if image:
+                break
+
+        name = (
+            detail.get("displayProductName")
+            or detail.get("sellerProductName")
+            or summary.get("sellerProductName")
+            or ""
+        )
+        results.append({
+            "platform_id": seller_id,
+            "name": name,
+            "price": price,
+            "category": str(detail.get("displayCategoryCode") or summary.get("displayCategoryCode") or ""),
+            "brand": detail.get("brand") or summary.get("brand") or "",
+            "image": image,
+            "status": detail.get("statusName") or summary.get("statusName") or "",
+        })
+
+    return results
 
 
 def sync_coupang_catalog(max_pages: int = 20) -> dict:
-    """쿠팡에 등록된 판매상품 목록을 읽어 로컬 DB에 반영한다."""
+    """쿠팡 Wing 전체 판매상품을 읽어 신규/수정 내용을 로컬 DB에 반영한다."""
     from app.platforms.coupang import get_coupang_uploader
+
     try:
-        items = get_coupang_uploader().list_seller_products(max_pages=max_pages)
+        uploader = get_coupang_uploader()
+        summaries = uploader.list_seller_products(max_pages=max_pages, page_size=100)
+        items: list[dict] = []
+        for summary in summaries:
+            seller_id = str(summary.get("sellerProductId", "") or "").strip()
+            if not seller_id:
+                continue
+            detail: dict = {}
+            try:
+                detail = uploader.get_seller_product(seller_id) or {}
+            except Exception as exc:
+                logger.warning("쿠팡 상품 상세 조회 실패 [%s]: %s", seller_id, exc)
+
+            detail_items = detail.get("items") or []
+            prices = [
+                _number(x.get("salePrice"))
+                for x in detail_items
+                if _number(x.get("salePrice")) > 0
+            ]
+            image = ""
+            for option in detail_items:
+                for img in option.get("images") or []:
+                    image = str(img.get("vendorPath") or img.get("cdnPath") or "")
+                    if image:
+                        break
+                if image:
+                    break
+
+            items.append({
+                "platform_id": seller_id,
+                "name": (
+                    detail.get("displayProductName")
+                    or detail.get("sellerProductName")
+                    or summary.get("sellerProductName")
+                    or ""
+                ),
+                "price": min(prices) if prices else 0.0,
+                "category": str(detail.get("displayCategoryCode") or summary.get("displayCategoryCode") or ""),
+                "brand": detail.get("brand") or summary.get("brand") or "",
+                "image": image,
+                "status": detail.get("statusName") or summary.get("statusName") or "",
+            })
     except Exception as exc:
         logger.error("쿠팡 카탈로그 동기화 실패: %s", exc)
         return {"ok": False, "error": str(exc)}
 
-    return _sync("coupang", items, "sellerProductId", "sellerProductName", "")
+    return _sync("coupang", items)
+
+
+def _smartstore_search_page(uploader, page: int, page_size: int) -> dict:
+    """네이버 공식 상품 목록 조회 API POST /v1/products/search 호출."""
+    payload = {
+        "page": page,
+        "size": min(max(int(page_size), 1), 500),
+        "orderType": "MOD_DATE",
+    }
+    response = httpx.post(
+        "https://api.commerce.naver.com/external/v1/products/search",
+        headers=uploader._headers(),  # 기존 OAuth 토큰/헤더 생성 로직 재사용
+        json=payload,
+        timeout=30,
+    )
+    if response.status_code != 200:
+        raise ValueError(
+            f"스마트스토어 상품목록 조회 실패 HTTP {response.status_code}: "
+            f"{response.text[:500]}"
+        )
+    return response.json()
 
 
 def sync_smartstore_catalog(max_pages: int = 20) -> dict:
-    """스마트스토어에 등록된 상품 목록을 읽어 로컬 DB에 반영한다.
-
-    ⚠️ list_origin_products()가 사용하는 엔드포인트는 실제 계정으로 검증되지
-    않았다 — 실패하거나 0건이 나오면 app/platforms/smartstore.py의
-    list_origin_products() 응답 파싱을 실제 에러/응답을 보고 조정해야 한다.
-    """
+    """스마트스토어 판매자센터 전체 상품을 공식 상품검색 API로 역동기화한다."""
     from app.platforms.smartstore import get_smartstore_uploader
+
     try:
-        items = get_smartstore_uploader().list_origin_products(max_pages=max_pages)
+        uploader = get_smartstore_uploader()
+        items: list[dict] = []
+
+        for page in range(1, max_pages + 1):
+            data = _smartstore_search_page(uploader, page=page, page_size=500)
+            contents = data.get("contents") or []
+            if not isinstance(contents, list) or not contents:
+                break
+
+            for row in contents:
+                origin_no = str(row.get("originProductNo") or "").strip()
+                channels = row.get("channelProducts") or []
+                # 스마트스토어 채널(STOREFARM)을 우선하고, 없으면 첫 채널을 사용한다.
+                channel = next(
+                    (x for x in channels if x.get("channelServiceType") == "STOREFARM"),
+                    channels[0] if channels else {},
+                )
+                if not origin_no:
+                    origin_no = str(channel.get("originProductNo") or "").strip()
+
+                image_obj = channel.get("representativeImage") or {}
+                items.append({
+                    "platform_id": origin_no,
+                    "name": channel.get("name") or row.get("name") or "",
+                    "price": channel.get("salePrice") or row.get("salePrice") or 0,
+                    "category": channel.get("wholeCategoryName") or channel.get("categoryId") or "",
+                    "brand": channel.get("brandName") or "",
+                    "image": image_obj.get("url") or "",
+                    "stock": channel.get("stockQuantity") or 0,
+                    "status": channel.get("statusType") or "",
+                    "modified_at": channel.get("modifiedDate") or "",
+                    "channel_product_no": str(channel.get("channelProductNo") or ""),
+                })
+
+            total_pages = int(data.get("totalPages") or 0)
+            if data.get("last") is True or (total_pages and page >= total_pages):
+                break
+            if len(contents) < 500 and not total_pages:
+                break
+
     except Exception as exc:
         logger.error("스마트스토어 카탈로그 동기화 실패: %s", exc)
         return {"ok": False, "error": str(exc)}
 
-    return _sync("smartstore", items, "originProductNo", "name", "salePrice")
+    return _sync("smartstore", items)
