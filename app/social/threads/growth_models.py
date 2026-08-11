@@ -23,7 +23,6 @@ class SocialContentDraft(Base):
     ai_source: Mapped[str] = mapped_column(String(30), default="rule")
     score: Mapped[float] = mapped_column(Float, default=0.0)
     status: Mapped[str] = mapped_column(String(30), default="draft", index=True)
-    # draft | approved | scheduled | published | rejected
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -39,6 +38,11 @@ class ScheduledSocialPost(Base):
     campaign_key: Mapped[str] = mapped_column(String(120), default="", index=True)
     cta_keyword: Mapped[str] = mapped_column(String(100), default="")
     tracking_link_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    media_type: Mapped[str] = mapped_column(String(20), default="TEXT", index=True)
+    # TEXT | IMAGE | VIDEO | CAROUSEL
+    media_url: Mapped[str] = mapped_column(Text, default="")
+    alt_text: Mapped[str] = mapped_column(String(1000), default="")
+    carousel_items_json: Mapped[str] = mapped_column(Text, default="[]")
     scheduled_at: Mapped[datetime] = mapped_column(DateTime, index=True)
     status: Mapped[str] = mapped_column(String(30), default="scheduled", index=True)
     # scheduled | publishing | published | failed | cancelled
@@ -47,9 +51,7 @@ class ScheduledSocialPost(Base):
     published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
-    __table_args__ = (
-        Index("ix_social_schedule_due", "status", "scheduled_at"),
-    )
+    __table_args__ = (Index("ix_social_schedule_due", "status", "scheduled_at"),)
 
 
 class TrackingLink(Base):
@@ -59,7 +61,7 @@ class TrackingLink(Base):
     code: Mapped[str] = mapped_column(String(32), unique=True, index=True)
     product_id: Mapped[int] = mapped_column(Integer, index=True)
     channel: Mapped[str] = mapped_column(String(30), default="threads", index=True)
-    platform: Mapped[str] = mapped_column(String(30), index=True)  # smartstore | coupang
+    platform: Mapped[str] = mapped_column(String(30), index=True)
     destination_url: Mapped[str] = mapped_column(Text)
     campaign_key: Mapped[str] = mapped_column(String(120), default="", index=True)
     post_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
@@ -78,9 +80,7 @@ class TrackingClick(Base):
     referer: Mapped[str] = mapped_column(Text, default="")
     clicked_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
-    __table_args__ = (
-        Index("ix_tracking_click_link_time", "tracking_link_id", "clicked_at"),
-    )
+    __table_args__ = (Index("ix_tracking_click_link_time", "tracking_link_id", "clicked_at"),)
 
 
 class OrderAttribution(Base):
@@ -96,7 +96,6 @@ class OrderAttribution(Base):
     campaign_key: Mapped[str] = mapped_column(String(120), default="", index=True)
     channel: Mapped[str] = mapped_column(String(30), default="threads", index=True)
     attribution_type: Mapped[str] = mapped_column(String(30), default="unattributed", index=True)
-    # deterministic | probabilistic | unattributed
     confidence: Mapped[float] = mapped_column(Float, default=0.0, index=True)
     order_amount: Mapped[float] = mapped_column(Float, default=0.0)
     reason: Mapped[str] = mapped_column(String(500), default="")
