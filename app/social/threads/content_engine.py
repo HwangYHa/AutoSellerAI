@@ -19,11 +19,16 @@ ANGLES = {
 def generate_threads_content(product: dict[str, Any], angle: str = "problem_solution",
                              cta_keyword: str = "", count: int = 3,
                              performance_context: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    if performance_context is None and product.get("id"):
+        try:
+            from app.social.threads.profit_feedback import learning_context
+            performance_context = learning_context(int(product["id"]))
+        except Exception:
+            performance_context = {}
     performance_context = performance_context or {}
     preferred = [x for x in performance_context.get("preferred_angles", []) if x in ANGLES]
     avoid = [x for x in performance_context.get("avoid_angles", []) if x in ANGLES]
 
-    # 사용자가 기본값을 둔 경우 충분한 실적 근거가 있으면 수익성이 검증된 각도를 우선한다.
     if angle not in ANGLES:
         angle = preferred[0] if preferred else "problem_solution"
     elif angle == "problem_solution" and preferred and performance_context.get("sample_orders", 0) >= 3:
