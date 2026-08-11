@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from datetime import datetime
 
@@ -10,6 +11,7 @@ from app.db import get_db, init_db
 from app.social.threads.client import ThreadsClient
 from app.social.threads.growth_models import ScheduledSocialPost, SocialContentDraft, TrackingLink
 from app.social.threads.models import ThreadsPost
+from app.social.threads.tracking import attribute_recent_orders
 
 logger = logging.getLogger(__name__)
 
@@ -99,12 +101,30 @@ def publish_due_posts(limit: int = 20) -> dict[str, int]:
 
 def run_scheduler_loop(interval_seconds: int = 20) -> None:
     interval_seconds = max(5, min(int(interval_seconds), 300))
-    logger.info("Threads scheduler started interval=%ss", interval_seconds)
+    attr_enabled = os.getenv("ATTRIBUTION_AUTO_ENABLED", "true").lower() == "true"
+    attr_every = max(60, int(os.getenv("ATTRIBUTION_RUN_INTERVAL_SECONDS", "300")))
+    attr_window = max(1, min(int(os.getenv("ATTRIBUTION_WINDOW_HOURS", "72")), 720))
+    last_attr = 0.0
+
+    logger.info(
+        "Threads scheduler started interval=%ss attribution=%s/%ss window=%sh",
+        interval_seconds, attr_enabled, attr_every, attr_window,
+    )
     while True:
         try:
             publish_due_posts()
         except Exception:
-            logger.exception("Threads scheduler cycle failed")
+            logger.exception("Threads scheduler publish cycle failed")
+
+        if attr_enabled and time.monotonic() - last_attr >= attr_every:
+            try:
+                result = attribute_recent_orders(window_hours=attr_window, force=False)
+                logger.info("order attribution cycle: %s", result)
+            except Exception:
+                logger.exception("Threads attribution cycle failed")
+            finally:
+                last_attr = time.monotonic()
+
         time.sleep(interval_seconds)
 
 
