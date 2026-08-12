@@ -29,11 +29,16 @@ def _load_onchannel():
     from app.suppliers.adapter_onchannel import OnchanelAdapter
     return OnchanelAdapter()
 
+def _load_ownerclan():
+    from app.suppliers.adapter_ownerclan import OwnerClanAdapter
+    return OwnerClanAdapter()
+
 
 _ADAPTER_FACTORIES: dict[str, Callable[[], SupplierAdapter]] = {
     "domeggook": _load_domeggook,
     "domemai":   _load_domemai,
     "onchannel": _load_onchannel,
+    "ownerclan": _load_ownerclan,
 }
 
 _instances: dict[str, SupplierAdapter] = {}
