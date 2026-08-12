@@ -57,6 +57,7 @@ st.sidebar.caption("통합 판매 운영 메뉴")
 st.sidebar.markdown("### 🧭 운영")
 st.sidebar.page_link("pages/00_AutoSeller_Main.py", label="통합 운영 화면", icon="⚡")
 st.sidebar.page_link("pages/05_판매채널_상품동기화.py", label="판매채널 상품 동기화", icon="🔄")
+st.sidebar.page_link("pages/25_AI_상세페이지_제작.py", label="상품 이미지 · AI 상세페이지", icon="🖼️")
 st.sidebar.markdown("### 🏭 공급처")
 st.sidebar.page_link("pages/20_오너클랜_연동.py", label="오너클랜 연동", icon="🏬")
 st.sidebar.markdown("### 🛒 소셜커머스")
@@ -81,8 +82,9 @@ with start1:
 with start2:
     with st.container(border=True):
         st.markdown("#### ② 상품 판매 운영")
-        st.write("판매자센터 직접 등록 상품을 먼저 동기화한 뒤, 상품 수집 → 선별 → 검색 최적화 → 등록 → 주문·배송·정산을 진행합니다.")
+        st.write("판매자센터 직접 등록 상품을 먼저 동기화한 뒤, 상품 수집 → 이미지 확인 → 검색 최적화 → 등록 → 주문·배송·정산을 진행합니다.")
         st.page_link("pages/05_판매채널_상품동기화.py", label="판매채널 상품 동기화", icon="🔄", use_container_width=True)
+        st.page_link("pages/25_AI_상세페이지_제작.py", label="상품 이미지 · 상세페이지 확인", icon="🖼️", use_container_width=True)
         st.page_link("pages/00_AutoSeller_Main.py", label="통합 운영 시작", icon="⚡", use_container_width=True)
 with start3:
     with st.container(border=True):
@@ -96,6 +98,7 @@ with left:
     st.markdown('<div class="area"><h3>⚡ 통합 운영</h3><div class="muted">오토셀러AI의 대시보드, 파이프라인, 상품, 검색 최적화, 주문, 정산, 재고, 알림, 스케줄러, 설정을 사용합니다.</div></div>', unsafe_allow_html=True)
     st.page_link("pages/20_오너클랜_연동.py", label="오너클랜 상품·주문 API", icon="🏬", use_container_width=True)
     st.page_link("pages/05_판매채널_상품동기화.py", label="쿠팡·스마트스토어 상품 가져오기", icon="🔄", use_container_width=True)
+    st.page_link("pages/25_AI_상세페이지_제작.py", label="원본 이미지 수집 · AI 상세페이지", icon="🖼️", use_container_width=True)
     st.page_link("pages/00_AutoSeller_Main.py", label="통합 운영 화면 열기", icon="➡️", use_container_width=True)
 
 with right:
