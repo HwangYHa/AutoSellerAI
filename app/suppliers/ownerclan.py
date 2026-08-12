@@ -139,7 +139,7 @@ class OwnerClanClient:
 
     def get_item(self, key: str) -> dict[str, Any] | None:
         query = """
-        query OwnerClanItem($key: ID!) {
+        query OwnerClanItem($key: String!) {
           item(key: $key) {
             key
             name
