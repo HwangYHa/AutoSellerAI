@@ -8,8 +8,10 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from gui.korean_runtime import apply_korean_patch
+from app.policies.runtime_patch import apply_fulfillment_policy_patch
 
 apply_korean_patch()
+apply_fulfillment_policy_patch()
 
 runpy.run_path(
     os.path.join(os.path.dirname(__file__), "..", "legacy_app.py"),
