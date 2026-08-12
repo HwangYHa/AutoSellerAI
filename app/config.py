@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     - 상품 사실정보(원산지/공급처 배송비/재고/옵션)는 공급처 또는 기존 마켓 상품에서 읽는다.
     - 판매자 계정정보(A/S 연락처/출고지/반품지)는 판매채널 API 계정값을 우선한다.
     - 환경변수의 배송/반품 관련 값은 API 조회가 불가능할 때만 사용하는 fallback이다.
+    - 상품 이미지/상세이미지는 공급처 API와 원본 HTML 태그를 우선 사용하고 AI 생성은 선택 기능이다.
     """
 
     # 애플리케이션 / 보안
@@ -78,8 +79,20 @@ class Settings(BaseSettings):
     claude_model_light: str = "claude-haiku-4-5-20251001"
     claude_model_heavy: str = "claude-sonnet-4-6"
 
-    # OpenAI 보조 기능
+    # OpenAI / AI 이미지 상세페이지
     openai_api_key: str = ""
+    image_ai_enabled: bool = False
+    image_ai_auto_generate: bool = False
+    image_ai_provider: str = "openai"
+    image_ai_model: str = "gpt-image-1"
+    image_ai_size: str = "1024x1536"
+    image_ai_quality: str = "medium"
+    image_ai_detail_count: int = 3
+    image_source_page_fetch: bool = True
+    image_output_dir: str = "data/generated"
+    # CDN/정적호스팅에 IMAGE_OUTPUT_DIR 파일을 같은 이름으로 노출할 때 사용.
+    # 비어 있으면 AI 이미지는 로컬 미리보기용으로만 사용한다.
+    image_public_base_url: str = ""
 
     # 텔레그램 알림
     telegram_bot_token: str = ""
