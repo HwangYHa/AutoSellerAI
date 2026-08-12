@@ -55,6 +55,8 @@ st.sidebar.caption("통합 판매 운영 메뉴")
 st.sidebar.markdown("### 🧭 운영")
 st.sidebar.page_link("pages/00_AutoSeller_Main.py", label="통합 운영 화면", icon="⚡")
 st.sidebar.page_link("pages/05_판매채널_상품동기화.py", label="판매채널 상품 동기화", icon="🔄")
+st.sidebar.markdown("### 🏭 공급처")
+st.sidebar.page_link("pages/20_오너클랜_연동.py", label="오너클랜 연동", icon="🏬")
 st.sidebar.markdown("### 🛒 소셜커머스")
 st.sidebar.page_link("pages/10_Social_Commerce_Threads.py", label="스레드 운영센터", icon="🧵")
 st.sidebar.page_link("pages/11_Threads_Growth_Automation.py", label="성장 자동화", icon="📈")
@@ -72,6 +74,7 @@ with start1:
     with st.container(border=True):
         st.markdown("#### ① 처음 설정")
         st.write("판매채널·공급처·AI·스레드 인증정보를 먼저 준비합니다.")
+        st.page_link("pages/20_오너클랜_연동.py", label="오너클랜 판매사 API 연결", icon="🏬", use_container_width=True)
         st.page_link("pages/90_사용자_매뉴얼.py", label="초기 설정 방법", icon="🔐", use_container_width=True)
 with start2:
     with st.container(border=True):
@@ -89,6 +92,7 @@ st.markdown("### 🧩 주요 기능")
 left, right = st.columns(2, gap="large")
 with left:
     st.markdown('<div class="area"><h3>⚡ 통합 운영</h3><div class="muted">오토셀러AI의 대시보드, 파이프라인, 상품, 검색 최적화, 주문, 정산, 재고, 알림, 스케줄러, 설정을 사용합니다.</div></div>', unsafe_allow_html=True)
+    st.page_link("pages/20_오너클랜_연동.py", label="오너클랜 상품·주문 API", icon="🏬", use_container_width=True)
     st.page_link("pages/05_판매채널_상품동기화.py", label="쿠팡·스마트스토어 상품 가져오기", icon="🔄", use_container_width=True)
     st.page_link("pages/00_AutoSeller_Main.py", label="통합 운영 화면 열기", icon="➡️", use_container_width=True)
 
