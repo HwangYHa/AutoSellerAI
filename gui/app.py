@@ -16,8 +16,10 @@ import streamlit as st
 
 from gui.help_center import render_process_overview, render_sidebar_help
 from gui.korean_runtime import apply_korean_patch
+from app.policies.runtime_patch import apply_fulfillment_policy_patch
 
 apply_korean_patch()
+apply_fulfillment_policy_patch()
 
 st.set_page_config(
     page_title="오토셀러 AI",
