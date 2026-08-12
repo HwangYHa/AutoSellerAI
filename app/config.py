@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     onchannel_login_id: str = ""
     onchannel_login_pw: str = ""
 
+    # 오너클랜 판매사 API (JWT + GraphQL)
+    ownerclan_username: str = ""
+    ownerclan_password: str = ""
+    ownerclan_environment: str = "production"  # production | sandbox
+
     # 네이버 쇼핑 검색 + 데이터랩 (같은 클라이언트 키 사용)
     naver_search_client_id: str = ""
     naver_search_client_secret: str = ""
