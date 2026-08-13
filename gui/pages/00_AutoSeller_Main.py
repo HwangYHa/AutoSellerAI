@@ -1,8 +1,4 @@
-"""AutoSellerAI Seller OS v2 — 단일 운영 제어센터.
-
-기존 legacy_app.py의 다중 탭 화면을 정상 운영 경로에서 제거하고
-상품 / 주문·배송 / 수익 / 연동·시스템 네 영역으로 통합한다.
-"""
+"""AutoSellerAI Seller OS v2 — 단일 운영 제어센터."""
 from __future__ import annotations
 
 import os
@@ -15,16 +11,27 @@ if PROJECT_ROOT not in sys.path:
 import streamlit as st
 from sqlalchemy import func
 
-from app.db import Listing, Order, PlatformOrder, Product, SettlementPeriod, get_db, init_db
+from app.db import Order, PlatformOrder, SettlementPeriod, get_db, init_db
 from app.orchestration.oneclick import get_next_stage, get_process_status
 from app.pipeline import collect_platform_orders, register_invoice_to_platform
 from app.policies.runtime_patch import apply_fulfillment_policy_patch
+from app.services.data_graph import get_data_graph_health, reconcile_data_graph
+from app.services.procurement_safety import (
+    cancel_latest_local_purchase_order,
+    ensure_procurement_guard,
+    get_recent_local_purchase_orders,
+)
 from gui.korean_runtime import apply_korean_patch
 from gui.product_workspace import render_product_workspace
 
 apply_korean_patch()
 apply_fulfillment_policy_patch()
 init_db()
+ensure_procurement_guard()
+try:
+    reconcile_data_graph(fetch_remote_identities=False)
+except Exception:
+    pass
 
 st.set_page_config(
     page_title="Seller OS | 오토셀러 AI",
@@ -50,7 +57,7 @@ st.markdown(
     """
     <div class="seller-hero">
       <h1>⚡ Seller OS</h1>
-      <p>오늘 처리할 일부터 상품·주문·배송·수익까지 한 화면 규칙으로 관리합니다.</p>
+      <p>상품 → 판매채널 → 주문 → 공급처 → 송장 → 수익 데이터를 하나의 연결된 흐름으로 관리합니다.</p>
     </div>
     """,
     unsafe_allow_html=True,
@@ -60,7 +67,6 @@ status = get_process_status()
 next_stage = get_next_stage(status)
 counts = status.get("counts", {})
 
-# 상단에는 '현재 상황 + 다음 행동'만 보여준다.
 q1, q2, q3, q4 = st.columns([1.1, 1.1, 1.1, 2.2])
 q1.metric("상품", counts.get("products", 0))
 q2.metric("판매중", counts.get("listed_products", 0))
@@ -71,7 +77,6 @@ with q4:
     else:
         st.success("필수 운영 단계가 모두 완료 상태입니다.")
 
-# 업무 목적 기준 4개 탭만 유지한다.
 tab_products, tab_orders, tab_profit, tab_system = st.tabs([
     "📦 상품",
     "🚚 주문 · 배송",
@@ -84,19 +89,24 @@ with tab_products:
 
 with tab_orders:
     st.markdown("### 🚚 주문 · 배송")
-    st.caption("주문 수집 → 공급처 확인/발주 → 송장 등록의 순서로 봅니다. 재고·발주서 같은 내부 기능은 실제 위탁 주문 흐름과 분리합니다.")
+    st.caption("판매채널 주문 → 내부 Product → 공급처 → 공급처 주문번호 → 실제 송장 순으로 연결합니다.")
 
     a, b, c = st.columns([1.3, 1.3, 3.4])
     hours = a.selectbox("수집 범위", [3, 12, 24, 72, 168], index=2, format_func=lambda x: f"최근 {x}시간")
     if b.button("🔄 신규 주문 수집", type="primary", use_container_width=True):
-        with st.spinner("쿠팡·스마트스토어 주문을 확인 중..."):
+        with st.spinner("쿠팡·스마트스토어 주문과 상품 식별자를 연결하는 중..."):
             try:
                 result = collect_platform_orders(hours_back=int(hours))
-                st.success("주문 수집 완료")
-                st.json(result, expanded=False)
+                graph_result = reconcile_data_graph(fetch_remote_identities=True)
+                st.success("주문 수집 및 상품 관계 연결 완료")
+                st.json({"orders": result, "links": graph_result}, expanded=False)
             except Exception as exc:
                 st.error(f"주문 수집 실패: {exc}")
-    c.info("실제 공급처 발주는 비용이 발생하므로 자동으로 실행하지 않습니다. 신규 주문을 먼저 확인한 뒤 발주/송장을 처리합니다.")
+    c.info("재고 사입 발주와 고객 주문의 공급처 발주는 서로 다른 기능입니다. 위탁판매에서는 고객 주문 단위 발주만 정상 운영 흐름에 사용합니다.")
+
+    graph_health = get_data_graph_health()
+    if graph_health.get("unlinked_platform_orders", 0):
+        st.warning(f"내부 상품과 아직 연결되지 않은 주문이 {graph_health['unlinked_platform_orders']}건 있습니다. ‘연동 · 시스템’에서 데이터 관계 동기화를 실행하세요.")
 
     with get_db() as db:
         orders = db.query(PlatformOrder).order_by(PlatformOrder.ordered_at.desc()).limit(100).all()
@@ -114,7 +124,8 @@ with tab_orders:
                 center.markdown(f"**{order.product_name or '상품명 미확인'}**")
                 center.caption(
                     f"주문 {order.platform_order_id} · 수량 {order.quantity} · "
-                    f"수취인 {order.receiver_name or '-'} · {order.ordered_at.strftime('%Y-%m-%d %H:%M') if order.ordered_at else ''}"
+                    f"내부상품 #{order.product_id or '-'} · 수취인 {order.receiver_name or '-'} · "
+                    f"{order.ordered_at.strftime('%Y-%m-%d %H:%M') if order.ordered_at else ''}"
                 )
                 if order.tracking_number:
                     center.write(f"📦 {order.delivery_company or '-'} · {order.tracking_number}")
@@ -141,7 +152,7 @@ with tab_orders:
 
 with tab_profit:
     st.markdown("### 💰 수익")
-    st.caption("상품관리 화면에서 판단해야 할 것은 예상마진, 여기서는 실제 주문·정산 결과만 봅니다.")
+    st.caption("예상마진은 상품에서, 실제 주문·정산 결과는 여기서 봅니다. Order.product_id도 판매채널 주문과 자동 연결합니다.")
     with get_db() as db:
         order_count = db.query(Order).count()
         revenue = float(db.query(func.coalesce(func.sum(Order.gross_revenue), 0)).scalar() or 0)
@@ -177,7 +188,7 @@ with tab_profit:
 
 with tab_system:
     st.markdown("### 🔌 연동 · 시스템")
-    st.caption("평소에는 이 화면을 건드릴 필요가 없습니다. 인증 변경이나 오류가 있을 때만 들어옵니다.")
+    st.caption("인증 점검, 데이터 관계 복구, 긴급 안전 작업만 둡니다.")
 
     checks = status.get("connections", {}).get("checks", {})
     c1, c2, c3, c4 = st.columns(4)
@@ -185,6 +196,37 @@ with tab_system:
     c2.metric("쿠팡", "설정됨" if checks.get("coupang") else "확인 필요")
     c3.metric("오너클랜", "설정됨" if checks.get("ownerclan") else "확인 필요")
     c4.metric("AI", "설정됨" if checks.get("ai") else "확인 필요")
+
+    st.markdown("#### 🔗 데이터 관계")
+    health = get_data_graph_health()
+    h1, h2, h3, h4 = st.columns(4)
+    h1.metric("판매채널 식별자", health["marketplace_identities"])
+    h2.metric("미연결 주문", health["unlinked_platform_orders"])
+    h3.metric("미연결 공급처 원본", health["supplier_raw_unlinked"])
+    h4.metric("미연결 워크플로", health["workflow_unlinked"])
+    if st.button("🔗 데이터 관계 전체 동기화", type="primary", use_container_width=True):
+        with st.spinner("쿠팡/스마트스토어 식별자와 공급처·주문·정산 관계를 다시 연결하는 중..."):
+            result = reconcile_data_graph(fetch_remote_identities=True)
+        st.success("데이터 관계 동기화 완료")
+        st.json(result, expanded=False)
+        st.rerun()
+
+    st.markdown("#### 🚨 재고 사입 안전")
+    st.info("위탁판매에서는 ‘전체 재고 발주’를 사용하지 않습니다. 재고 사입 PurchaseOrder 신규 생성은 기본적으로 DB 단계에서 차단합니다.")
+    recent_pos = get_recent_local_purchase_orders(limit=5)
+    if recent_pos:
+        st.dataframe(recent_pos, use_container_width=True, hide_index=True)
+        confirm_cancel = st.checkbox("가장 최근의 draft/confirmed 로컬 재고 발주 1건을 취소합니다.")
+        if st.button("🚨 최근 로컬 재고 발주 긴급취소", disabled=not confirm_cancel, use_container_width=True):
+            result = cancel_latest_local_purchase_order(max_age_minutes=180)
+            if result.get("ok"):
+                st.success(f"{result['po_number']} 취소 완료 · 입고예정 수량도 원복했습니다.")
+                st.json(result, expanded=False)
+                st.rerun()
+            else:
+                st.warning(result.get("error", "취소 가능한 발주가 없습니다."))
+    else:
+        st.caption("로컬 재고 사입 발주 이력이 없습니다.")
 
     st.markdown("#### 필요한 설정 화면")
     l1, l2, l3, l4 = st.columns(4)
