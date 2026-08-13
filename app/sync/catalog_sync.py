@@ -5,10 +5,11 @@ AutoSellerAI를 통하지 않고 쿠팡 Wing 또는 네이버 스마트스토어
 플랫폼에는 쓰기 작업을 하지 않는다.
 
 동기화 원칙
-1. 동일 platform/platform_id Listing이 있으면 외부 상품명·판매가 등 변경사항을 갱신한다.
+1. 동일 platform/platform_id Listing이 있으면 외부 상품명·판매가·이미지 등 변경사항을 갱신한다.
 2. Listing은 없지만 IMPORT-{platform}-{platform_id} 상품이 있으면 다시 연결한다.
 3. 이름이 같은 로컬 상품이 있고 해당 플랫폼 Listing이 없으면 그 상품에 연결한다.
 4. 나머지는 source={platform}_import 신규 Product로 만든다.
+5. 판매채널 API의 상대 이미지 경로는 DB에 저장하기 전에 브라우저 표시 가능한 절대 URL로 정규화한다.
 """
 from __future__ import annotations
 
@@ -19,6 +20,11 @@ from typing import Any
 import httpx
 
 from app.db import Listing, Product, get_db
+from app.media.marketplace_images import (
+    extract_coupang_product_images,
+    normalize_image_list,
+    normalize_image_url,
+)
 from app.seo.duplicate_detector import _normalize
 
 logger = logging.getLogger(__name__)
@@ -29,6 +35,21 @@ def _number(value: Any) -> float:
         return float(value or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _item_images(item: dict, platform: str) -> tuple[list[str], list[str]]:
+    """신/구 카탈로그 아이템 포맷을 모두 지원한다."""
+    images = item.get("images")
+    if not isinstance(images, list):
+        image = item.get("image")
+        images = [image] if image else []
+    details = item.get("detail_images")
+    if not isinstance(details, list):
+        details = []
+    return (
+        normalize_image_list(images, platform=platform),
+        normalize_image_list(details, platform=platform),
+    )
 
 
 def _find_or_link_product(
@@ -57,7 +78,7 @@ def _find_or_link_product(
             if not already_linked:
                 return candidate, False
 
-    image = str(item.get("image", "") or "").strip()
+    images, detail_images = _item_images(item, platform)
     product = Product(
         sku=sku,
         source=f"{platform}_import",
@@ -67,7 +88,8 @@ def _find_or_link_product(
         sell_price=price,
         category=str(item.get("category", "") or "")[:200],
         brand=str(item.get("brand", "") or "")[:120],
-        images=json.dumps([image] if image else [], ensure_ascii=False),
+        images=json.dumps(images, ensure_ascii=False),
+        detail_images=json.dumps(detail_images, ensure_ascii=False),
         status="listed",
     )
     db.add(product)
@@ -75,7 +97,7 @@ def _find_or_link_product(
     return product, True
 
 
-def _apply_external_fields(product: Product, item: dict) -> bool:
+def _apply_external_fields(product: Product, item: dict, platform: str) -> bool:
     """판매자센터에서 바뀐 사용자 노출 필드를 로컬 Product에 반영한다."""
     changed = False
 
@@ -99,11 +121,16 @@ def _apply_external_fields(product: Product, item: dict) -> bool:
         product.brand = brand[:120]
         changed = True
 
-    image = str(item.get("image", "") or "").strip()
-    if image:
-        images_json = json.dumps([image], ensure_ascii=False)
+    images, details = _item_images(item, platform)
+    if images:
+        images_json = json.dumps(images, ensure_ascii=False)
         if product.images != images_json:
             product.images = images_json
+            changed = True
+    if details:
+        details_json = json.dumps(details, ensure_ascii=False)
+        if product.detail_images != details_json:
+            product.detail_images = details_json
             changed = True
 
     if product.status != "listed":
@@ -132,7 +159,7 @@ def _sync(platform: str, items: list[dict]) -> dict:
                 product = db.query(Product).filter_by(id=listing.product_id).first()
                 changed = False
                 if product:
-                    changed = _apply_external_fields(product, item)
+                    changed = _apply_external_fields(product, item, platform)
                 if listing.status != "success" or listing.error:
                     listing.status = "success"
                     listing.error = ""
@@ -144,7 +171,7 @@ def _sync(platform: str, items: list[dict]) -> dict:
                 continue
 
             product, was_created = _find_or_link_product(db, platform, platform_id, item)
-            _apply_external_fields(product, item)
+            _apply_external_fields(product, item, platform)
             db.add(Listing(
                 product_id=product.id,
                 platform=platform,
@@ -168,8 +195,35 @@ def _sync(platform: str, items: list[dict]) -> dict:
     }
 
 
+def _coupang_item(summary: dict, detail: dict) -> dict:
+    detail_items = detail.get("items") or []
+    prices = [
+        _number(x.get("salePrice"))
+        for x in detail_items
+        if _number(x.get("salePrice")) > 0
+    ]
+    images, detail_images = extract_coupang_product_images(detail)
+    seller_id = str(summary.get("sellerProductId", "") or detail.get("sellerProductId") or "").strip()
+    return {
+        "platform_id": seller_id,
+        "name": (
+            detail.get("displayProductName")
+            or detail.get("sellerProductName")
+            or summary.get("sellerProductName")
+            or ""
+        ),
+        "price": min(prices) if prices else 0.0,
+        "category": str(detail.get("displayCategoryCode") or summary.get("displayCategoryCode") or ""),
+        "brand": detail.get("brand") or summary.get("brand") or "",
+        "images": images,
+        "detail_images": detail_images,
+        "image": images[0] if images else "",  # 레거시 호환
+        "status": detail.get("statusName") or summary.get("statusName") or "",
+    }
+
+
 def _coupang_catalog_items() -> list[dict]:
-    """쿠팡 목록 API + 상세 API로 상품명/가격/대표이미지를 읽는다."""
+    """쿠팡 목록 API + 상세 API로 상품명/가격/대표·상세 이미지를 읽는다."""
     from app.platforms.coupang import get_coupang_uploader
 
     uploader = get_coupang_uploader()
@@ -180,43 +234,12 @@ def _coupang_catalog_items() -> list[dict]:
         seller_id = str(summary.get("sellerProductId", "") or "").strip()
         if not seller_id:
             continue
-
         detail: dict = {}
         try:
             detail = uploader.get_seller_product(seller_id) or {}
         except Exception as exc:
-            # 목록 자체는 성공했으므로 한 상품 상세 실패 때문에 전체 동기화를 중단하지 않는다.
             logger.warning("쿠팡 상품 상세 조회 실패 [%s]: %s", seller_id, exc)
-
-        items = detail.get("items") or []
-        prices = [_number(x.get("salePrice")) for x in items if _number(x.get("salePrice")) > 0]
-        price = min(prices) if prices else 0.0
-
-        image = ""
-        for option in items:
-            for img in option.get("images") or []:
-                image = str(img.get("vendorPath") or img.get("cdnPath") or "")
-                if image:
-                    break
-            if image:
-                break
-
-        name = (
-            detail.get("displayProductName")
-            or detail.get("sellerProductName")
-            or summary.get("sellerProductName")
-            or ""
-        )
-        results.append({
-            "platform_id": seller_id,
-            "name": name,
-            "price": price,
-            "category": str(detail.get("displayCategoryCode") or summary.get("displayCategoryCode") or ""),
-            "brand": detail.get("brand") or summary.get("brand") or "",
-            "image": image,
-            "status": detail.get("statusName") or summary.get("statusName") or "",
-        })
-
+        results.append(_coupang_item(summary, detail))
     return results
 
 
@@ -237,36 +260,7 @@ def sync_coupang_catalog(max_pages: int = 20) -> dict:
                 detail = uploader.get_seller_product(seller_id) or {}
             except Exception as exc:
                 logger.warning("쿠팡 상품 상세 조회 실패 [%s]: %s", seller_id, exc)
-
-            detail_items = detail.get("items") or []
-            prices = [
-                _number(x.get("salePrice"))
-                for x in detail_items
-                if _number(x.get("salePrice")) > 0
-            ]
-            image = ""
-            for option in detail_items:
-                for img in option.get("images") or []:
-                    image = str(img.get("vendorPath") or img.get("cdnPath") or "")
-                    if image:
-                        break
-                if image:
-                    break
-
-            items.append({
-                "platform_id": seller_id,
-                "name": (
-                    detail.get("displayProductName")
-                    or detail.get("sellerProductName")
-                    or summary.get("sellerProductName")
-                    or ""
-                ),
-                "price": min(prices) if prices else 0.0,
-                "category": str(detail.get("displayCategoryCode") or summary.get("displayCategoryCode") or ""),
-                "brand": detail.get("brand") or summary.get("brand") or "",
-                "image": image,
-                "status": detail.get("statusName") or summary.get("statusName") or "",
-            })
+            items.append(_coupang_item(summary, detail))
     except Exception as exc:
         logger.error("쿠팡 카탈로그 동기화 실패: %s", exc)
         return {"ok": False, "error": str(exc)}
@@ -283,7 +277,7 @@ def _smartstore_search_page(uploader, page: int, page_size: int) -> dict:
     }
     response = httpx.post(
         "https://api.commerce.naver.com/external/v1/products/search",
-        headers=uploader._headers(),  # 기존 OAuth 토큰/헤더 생성 로직 재사용
+        headers=uploader._headers(),
         json=payload,
         timeout=30,
     )
@@ -312,7 +306,6 @@ def sync_smartstore_catalog(max_pages: int = 20) -> dict:
             for row in contents:
                 origin_no = str(row.get("originProductNo") or "").strip()
                 channels = row.get("channelProducts") or []
-                # 스마트스토어 채널(STOREFARM)을 우선하고, 없으면 첫 채널을 사용한다.
                 channel = next(
                     (x for x in channels if x.get("channelServiceType") == "STOREFARM"),
                     channels[0] if channels else {},
@@ -321,13 +314,15 @@ def sync_smartstore_catalog(max_pages: int = 20) -> dict:
                     origin_no = str(channel.get("originProductNo") or "").strip()
 
                 image_obj = channel.get("representativeImage") or {}
+                image_url = normalize_image_url(image_obj.get("url"), platform="smartstore")
                 items.append({
                     "platform_id": origin_no,
                     "name": channel.get("name") or row.get("name") or "",
                     "price": channel.get("salePrice") or row.get("salePrice") or 0,
                     "category": channel.get("wholeCategoryName") or channel.get("categoryId") or "",
                     "brand": channel.get("brandName") or "",
-                    "image": image_obj.get("url") or "",
+                    "images": [image_url] if image_url else [],
+                    "image": image_url,
                     "stock": channel.get("stockQuantity") or 0,
                     "status": channel.get("statusType") or "",
                     "modified_at": channel.get("modifiedDate") or "",
