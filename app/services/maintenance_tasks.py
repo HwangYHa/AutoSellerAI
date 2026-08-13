@@ -5,8 +5,8 @@ from typing import Any
 
 
 def repair_all_product_images_task(include_marketplaces: bool = True) -> dict[str, Any]:
-    from app.services.product_catalog import repair_all_product_images
-    return repair_all_product_images(include_marketplaces=include_marketplaces)
+    from app.services.image_maintenance import repair_all_product_images_responsive
+    return repair_all_product_images_responsive(include_marketplaces=include_marketplaces)
 
 
 def reconcile_data_graph_task(fetch_remote_identities: bool = True) -> dict[str, Any]:
