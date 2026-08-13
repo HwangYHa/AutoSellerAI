@@ -53,10 +53,10 @@ st.sidebar.page_link("pages/30_상품소싱.py", label="통합 상품 소싱", i
 st.sidebar.page_link("pages/25_AI_상세페이지_제작.py", label="이미지 · AI 상세페이지", icon="🖼️")
 
 st.sidebar.markdown("### 연동 설정")
-st.sidebar.page_link("pages/05_판매채널_상품동기화.py", label="쿠팡 · 스마트스토어", icon="🔄")
-st.sidebar.page_link("pages/20_오너클랜_연동.py", label="오너클랜", icon="🏬")
-st.sidebar.page_link("pages/21_도매꾹_연동.py", label="도매꾹", icon="🏷️")
-st.sidebar.page_link("pages/22_온채널_연동.py", label="온채널", icon="🛍️")
+st.sidebar.page_link("pages/05_판매채널_상품동기화.py", label="쿠팡 · 스마트스토어 연동", icon="🔄")
+st.sidebar.page_link("pages/20_오너클랜_연동.py", label="오너클랜 연동", icon="🏬")
+st.sidebar.page_link("pages/21_도매꾹_연동.py", label="도매꾹 연동", icon="🏷️")
+st.sidebar.page_link("pages/22_온채널_연동.py", label="온채널 연동", icon="🛍️")
 
 st.sidebar.markdown("### 마케팅 · 학습")
 st.sidebar.page_link("pages/10_Social_Commerce_Threads.py", label="스레드 판매", icon="🧵")
