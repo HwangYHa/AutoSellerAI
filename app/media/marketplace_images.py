@@ -54,7 +54,7 @@ def normalize_image_url(value: object, *, platform: str = "") -> str:
 
     if platform.lower() == "coupang":
         path = v.lstrip("/")
-        # 상품조회 API cdnPath의 대표적인 두 형태를 지원한다.
+        # 상품조회 API cdnPath의 대표적인 형태를 지원한다.
         if path.startswith(("vendor_inventory/", "product/", "image/")):
             if path.startswith("image/"):
                 path = path[len("image/"):]
@@ -119,8 +119,10 @@ def extract_coupang_product_images(detail: dict) -> tuple[list[str], list[str]]:
                     continue
                 if "<img" in raw.lower() or "<source" in raw.lower():
                     extracted = extract_images_from_html(raw)
-                    details.extend(extracted.images)
-                    details.extend(extracted.detail_images)
+                    for candidate in [*extracted.images, *extracted.detail_images]:
+                        url = normalize_image_url(candidate, platform="coupang")
+                        if url:
+                            details.append(url)
                 else:
                     # HTML이 아닌 URL 문자열인 경우도 처리한다.
                     for candidate in re.findall(r"https?://[^\s\"'<>]+", raw):
