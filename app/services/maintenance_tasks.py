@@ -14,6 +14,15 @@ def reconcile_data_graph_task(fetch_remote_identities: bool = True) -> dict[str,
     return reconcile_data_graph(fetch_remote_identities=fetch_remote_identities)
 
 
+def collect_orders_and_reconcile_task(hours_back: int = 24) -> dict[str, Any]:
+    from app.pipeline import collect_platform_orders
+    from app.services.data_graph import reconcile_data_graph
+
+    orders = collect_platform_orders(hours_back=int(hours_back))
+    links = reconcile_data_graph(fetch_remote_identities=True)
+    return {"orders": orders, "links": links}
+
+
 def bulk_upload_products_task(product_ids: list[int], platforms: list[str]) -> dict[str, Any]:
     from app.pipeline import upload_product
 
