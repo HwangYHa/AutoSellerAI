@@ -3,20 +3,21 @@
 원칙:
 - 한 화면에서 검색 → 판단 → 일괄작업 → 상세확인 순서만 사용한다.
 - 공급처/판매채널별 예외 로직은 app.services 계층에 숨긴다.
-- 깨진 이미지 URL은 절대 렌더링하지 않고 명확한 placeholder로 표시한다.
+- 외부 이미지 URL을 브라우저에 직접 핫링크하지 않고 서버측으로 받아 표시한다.
+- 깨진 이미지 URL은 명확한 placeholder로 처리한다.
 """
 from __future__ import annotations
 
-import math
-
 import streamlit as st
 
+from app.media.image_display import clear_display_image_cache, fetch_display_image
 from app.pipeline import upload_product
 from app.services.product_catalog import (
     SOURCE_LABELS,
     delete_products,
     get_catalog,
     get_product_snapshot,
+    repair_all_product_images,
     repair_product_image_urls,
     set_products_status,
 )
@@ -35,15 +36,33 @@ def _channel_badges(channels: list[str]) -> str:
     return " · ".join(labels) if labels else "미등록"
 
 
-def _render_placeholder() -> None:
+def _render_placeholder(height: int = 112, caption: str = "이미지 없음") -> None:
     st.markdown(
-        """
-        <div style="width:100%;height:112px;border:1px solid #e2e8f0;border-radius:12px;
+        f"""
+        <div style="width:100%;height:{height}px;border:1px solid #e2e8f0;border-radius:12px;
         background:#f8fafc;display:flex;align-items:center;justify-content:center;
         color:#94a3b8;font-size:26px">🖼️</div>
         """,
         unsafe_allow_html=True,
     )
+    if caption:
+        st.caption(caption)
+
+
+def _image_bytes(url: str, source_url: str = "") -> bytes | None:
+    if not url:
+        return None
+    return fetch_display_image(str(url), str(source_url or ""))
+
+
+def _render_remote_image(url: str, source_url: str = "", *, height: int = 112) -> bool:
+    """외부 URL을 서버측으로 다운로드해 Streamlit에 표시한다."""
+    data = _image_bytes(url, source_url)
+    if not data:
+        _render_placeholder(height=height, caption="이미지 불러오기 실패")
+        return False
+    st.image(data, use_container_width=True)
+    return True
 
 
 def _render_product_card(item: dict) -> None:
@@ -51,10 +70,9 @@ def _render_product_card(item: dict) -> None:
         image_col, info_col, action_col = st.columns([1.1, 4.8, 1.4], vertical_alignment="center")
         with image_col:
             if item.get("image_url"):
-                st.image(item["image_url"], use_container_width=True)
+                _render_remote_image(item["image_url"], item.get("source_url", ""))
             else:
                 _render_placeholder()
-                st.caption("이미지 없음")
 
         with info_col:
             st.markdown(f"**{item['name']}**")
@@ -106,13 +124,18 @@ def _render_detail_panel(product_id: int) -> None:
     left, right = st.columns([1.7, 3.3], gap="large")
     with left:
         if item["images"]:
-            st.image(item["images"][0], use_container_width=True)
+            _render_remote_image(item["images"][0], item.get("source_url", ""), height=220)
             if len(item["images"]) > 1:
                 thumbs = st.columns(min(4, len(item["images"]) - 1))
                 for col, url in zip(thumbs, item["images"][1:5]):
-                    col.image(url, use_container_width=True)
+                    with col:
+                        data = _image_bytes(url, item.get("source_url", ""))
+                        if data:
+                            st.image(data, use_container_width=True)
+                        else:
+                            _render_placeholder(height=72, caption="")
         else:
-            _render_placeholder()
+            _render_placeholder(height=220)
 
     with right:
         st.markdown(f"#### {item['name']}")
@@ -140,10 +163,15 @@ def _render_detail_panel(product_id: int) -> None:
 
     if item.get("detail_images"):
         with st.expander(f"상세 이미지 {len(item['detail_images'])}장"):
-            for start in range(0, min(len(item["detail_images"]), 12), 3):
+            for start in range(0, min(len(item["detail_images"]), 18), 3):
                 cols = st.columns(3)
                 for col, url in zip(cols, item["detail_images"][start:start + 3]):
-                    col.image(url, use_container_width=True)
+                    with col:
+                        data = _image_bytes(url, item.get("source_url", ""))
+                        if data:
+                            st.image(data, use_container_width=True)
+                        else:
+                            _render_placeholder(height=120, caption="")
 
     if item.get("options"):
         with st.expander("옵션"):
@@ -170,17 +198,44 @@ def _run_bulk_upload(ids: list[int], platforms: list[str]) -> None:
         st.error("등록 실패: " + " | ".join(failures[:5]))
 
 
+def _show_image_repair_result(result: dict) -> None:
+    local = result.get("local", {})
+    suppliers = result.get("suppliers", {})
+    marketplaces = result.get("marketplaces", {})
+
+    st.success(
+        "이미지 복구 완료 · "
+        f"URL 정리 {local.get('changed', 0)}건 · "
+        f"공급처 재조회 {suppliers.get('checked', 0)}개 / 갱신 {suppliers.get('updated', 0)}개"
+    )
+    if suppliers.get("still_missing"):
+        st.warning(f"공급처 재조회 후에도 대표 이미지가 없는 상품: {suppliers['still_missing']}개")
+    if suppliers.get("errors"):
+        with st.expander("공급처 이미지 재조회 오류"):
+            for error in suppliers["errors"]:
+                st.write("- " + error)
+
+    for platform, label in (("coupang", "쿠팡"), ("smartstore", "스마트스토어")):
+        p = marketplaces.get(platform) or {}
+        if p.get("ok"):
+            st.caption(
+                f"✅ {label}: 발견 {p.get('total_found', 0)} · 신규 {p.get('created', 0)} · "
+                f"변경 {p.get('updated', 0)}"
+            )
+        elif p:
+            st.warning(f"{label} 재동기화는 실패했습니다: {p.get('error', '알 수 없는 오류')}")
+
+
 def render_product_workspace() -> None:
     st.session_state.setdefault("catalog_selected_ids", [])
     st.markdown("### 📦 상품 관리")
     st.caption("상품을 찾고 → 상태를 판단하고 → 필요한 작업만 실행합니다. 공급처별 세부 메뉴를 오갈 필요가 없습니다.")
 
-    # 깨진 레거시 이미지 값은 화면 진입 시 로컬 DB에서 안전하게 정규화한다.
+    # 진입 시에는 네트워크 요청 없이 저장된 URL 형식만 정리한다.
     if not st.session_state.get("catalog_image_repair_done"):
         repair_product_image_urls()
         st.session_state["catalog_image_repair_done"] = True
 
-    # 검색 / 필터
     f1, f2, f3, f4, f5 = st.columns([2.4, 1.1, 1.2, 1.1, 1.1])
     search = f1.text_input("상품 검색", placeholder="상품명 · SKU · 상품번호", label_visibility="collapsed")
     status_label = f2.selectbox("상태", ["전체", "판매 준비", "판매중", "준비중"], label_visibility="collapsed")
@@ -218,27 +273,26 @@ def render_product_workspace() -> None:
     m4.metric("조치 필요", metrics["needs_action"])
     m5.metric("이미지 없음", metrics["no_image"])
 
-    # 작업바: 화면에 흩어진 기능을 한 곳으로 통합
     with st.container(border=True):
         b1, b2, b3, b4 = st.columns([1.3, 1.4, 1.4, 2.5])
         if b1.button("🔄 판매채널 동기화", use_container_width=True):
             st.switch_page("pages/05_판매채널_상품동기화.py")
         if b2.button("➕ 공급처 상품 가져오기", use_container_width=True):
             st.switch_page("pages/30_상품소싱.py")
-        if b3.button("🖼️ 이미지 복구", use_container_width=True):
-            with st.spinner("저장된 이미지 경로 정리 및 쿠팡 상품 이미지 재동기화 중..."):
-                local = repair_product_image_urls()
-                try:
-                    from app.sync.catalog_sync import sync_coupang_catalog
-                    remote = sync_coupang_catalog()
-                except Exception as exc:
-                    remote = {"ok": False, "error": str(exc)}
-            if remote.get("ok"):
-                st.success(f"이미지 경로 정리 {local['changed']}건 · 쿠팡 재동기화 완료")
-            else:
-                st.warning(f"로컬 이미지 정리는 완료했지만 쿠팡 재동기화 실패: {remote.get('error', '')}")
+        if b3.button("🖼️ 전체 이미지 복구", use_container_width=True):
+            with st.spinner("공급처 원본·판매채널 API에서 대표/상세 이미지를 다시 수집 중입니다..."):
+                result = repair_all_product_images(include_marketplaces=True)
+                clear_display_image_cache()
+            st.session_state["catalog_last_image_repair"] = result
             st.rerun()
-        b4.caption("이미지가 깨지면 먼저 ‘이미지 복구’를 실행하세요. 상대 cdnPath를 절대 URL로 변환하고 쿠팡에서 최신 대표/상세 이미지를 다시 읽습니다.")
+        b4.caption(
+            "이미지가 없거나 깨지면 ‘전체 이미지 복구’를 한 번 실행하세요. "
+            "도매꾹·도매매·온채널·오너클랜 원본과 쿠팡·스마트스토어를 다시 조회합니다."
+        )
+
+    last_repair = st.session_state.pop("catalog_last_image_repair", None)
+    if last_repair:
+        _show_image_repair_result(last_repair)
 
     selected_ids = sorted(set(int(x) for x in st.session_state.get("catalog_selected_ids", [])))
     if selected_ids:
@@ -279,13 +333,15 @@ def render_product_workspace() -> None:
         for item in data["items"]:
             _render_product_card(item)
 
-    # 페이지 이동
     if data["pages"] > 1:
         prev_col, mid_col, next_col = st.columns([1, 2, 1])
         if prev_col.button("← 이전", disabled=page <= 1, use_container_width=True):
             st.session_state["catalog_page"] = page - 1
             st.rerun()
-        mid_col.markdown(f"<div style='text-align:center;padding:8px'>페이지 {page} / {data['pages']} · {data['total']}개</div>", unsafe_allow_html=True)
+        mid_col.markdown(
+            f"<div style='text-align:center;padding:8px'>페이지 {page} / {data['pages']} · {data['total']}개</div>",
+            unsafe_allow_html=True,
+        )
         if next_col.button("다음 →", disabled=page >= data["pages"], use_container_width=True):
             st.session_state["catalog_page"] = page + 1
             st.rerun()
