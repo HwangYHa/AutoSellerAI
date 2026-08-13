@@ -1,12 +1,12 @@
 """도매꾹/온채널 공급처 연동 화면 공통 UI."""
 from __future__ import annotations
 
-import os
 from typing import Any
 
 import streamlit as st
 
 from app.config import get_settings
+from app.media.image_display import fetch_display_image
 from app.pipeline import import_product
 from app.suppliers.registry import get_adapter
 
@@ -73,6 +73,14 @@ def _rows(items) -> list[dict[str, Any]]:
     ]
 
 
+def _render_preview(url: str, source_url: str) -> None:
+    data = fetch_display_image(str(url or ""), str(source_url or ""))
+    if data:
+        st.image(data, width=260)
+    else:
+        st.warning("이미지 URL은 발견했지만 미리보기를 불러오지 못했습니다. 원본 페이지 또는 전체 이미지 복구에서 다시 확인하세요.")
+
+
 def render_supplier_workspace(supplier_id: str) -> None:
     meta = _META[supplier_id]
     key = f"supplier_{supplier_id}"
@@ -135,7 +143,7 @@ def render_supplier_workspace(supplier_id: str) -> None:
 
         st.markdown("## 3. 상품 상세 · AutoSellerAI 등록")
         if st.button("📄 최신 상세정보 조회", key=f"{key}_detail"):
-            with st.spinner("공급처에서 최신 상세정보 조회 중..."):
+            with st.spinner("공급처에서 최신 상세정보와 대표/상세 이미지를 조회 중..."):
                 detail = adapter.get_product(selected.raw_id)
             if detail:
                 st.session_state[f"{key}_detail_product"] = detail
@@ -154,10 +162,10 @@ def render_supplier_workspace(supplier_id: str) -> None:
             m3.metric("재고", detail.stock)
             m4.metric("배송비", f"{detail.shipping_fee:,.0f}원")
             if detail.images:
-                try:
-                    st.image(detail.images[0], width=260)
-                except Exception:
-                    pass
+                _render_preview(detail.images[0], detail.raw_url)
+                st.caption(f"대표 {len(detail.images)}장 · 상세 {len(detail.detail_images)}장 수집")
+            else:
+                st.warning("대표 이미지를 아직 찾지 못했습니다. ‘최신 상세정보 조회’를 실행한 뒤에도 없으면 원본 페이지 구조를 점검해야 합니다.")
             st.caption(f"상품코드: {detail.raw_id} · 원본: {detail.raw_url}")
 
             markup = st.number_input("판매가 배수", min_value=1.0, max_value=10.0, value=2.0, step=0.1, key=f"{key}_markup")
