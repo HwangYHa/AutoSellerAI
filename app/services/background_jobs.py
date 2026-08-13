@@ -1,22 +1,21 @@
 """Process-local background jobs for Streamlit maintenance work.
 
-The goal is to keep long supplier/marketplace operations away from the Streamlit
-request/WebSocket lifecycle. Jobs continue even if the browser disconnects.
+Long supplier/marketplace operations are kept away from the Streamlit
+request/WebSocket lifecycle. Browser disconnects do not cancel a job.
 
-This intentionally has no Streamlit dependency. It is suitable for the local
-Seller OS process and can later be swapped for RQ without changing the UI API.
+Workers are daemon threads: stopping the local Streamlit server does not wait for
+long maintenance work to finish. At most two jobs execute concurrently.
 """
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import datetime, timezone
-from threading import Lock
+from threading import BoundedSemaphore, Lock, Thread
 from typing import Any, Callable
 from uuid import uuid4
 
-_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="autoseller-bg")
 _LOCK = Lock()
+_SLOTS = BoundedSemaphore(value=2)
 _JOBS: dict[str, dict[str, Any]] = {}
 _MAX_JOBS = 50
 
@@ -38,7 +37,7 @@ def _trim_jobs() -> None:
 
 
 def submit_background_job(name: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> str:
-    """Submit a callable and return a stable job id immediately."""
+    """Start a daemon job and return its id immediately."""
     job_id = uuid4().hex
     with _LOCK:
         _JOBS[job_id] = {
@@ -54,30 +53,31 @@ def submit_background_job(name: str, fn: Callable[..., Any], *args: Any, **kwarg
         _trim_jobs()
 
     def runner() -> None:
-        with _LOCK:
-            row = _JOBS.get(job_id)
-            if not row:
+        with _SLOTS:
+            with _LOCK:
+                row = _JOBS.get(job_id)
+                if not row:
+                    return
+                row["status"] = "running"
+                row["started_at"] = _now()
+            try:
+                result = fn(*args, **kwargs)
+            except Exception as exc:
+                with _LOCK:
+                    row = _JOBS.get(job_id)
+                    if row:
+                        row["status"] = "failed"
+                        row["error"] = f"{type(exc).__name__}: {exc}"
+                        row["finished_at"] = _now()
                 return
-            row["status"] = "running"
-            row["started_at"] = _now()
-        try:
-            result = fn(*args, **kwargs)
-        except Exception as exc:  # background boundary: persist error for UI
             with _LOCK:
                 row = _JOBS.get(job_id)
                 if row:
-                    row["status"] = "failed"
-                    row["error"] = f"{type(exc).__name__}: {exc}"
+                    row["status"] = "success"
+                    row["result"] = result
                     row["finished_at"] = _now()
-            return
-        with _LOCK:
-            row = _JOBS.get(job_id)
-            if row:
-                row["status"] = "success"
-                row["result"] = result
-                row["finished_at"] = _now()
 
-    _EXECUTOR.submit(runner)
+    Thread(target=runner, name=f"autoseller-bg-{job_id[:8]}", daemon=True).start()
     return job_id
 
 
