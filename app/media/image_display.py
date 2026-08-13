@@ -19,6 +19,7 @@ _BROWSER_UA = (
 )
 # 목록 화면에서 수백 MB가 메모리에 쌓이지 않도록 개별 이미지와 LRU 개수를 제한한다.
 _MAX_IMAGE_BYTES = 6 * 1024 * 1024
+_DISPLAY_TIMEOUT_SECONDS = 5.0
 
 
 def _referer_for(source_url: str, image_url: str) -> str:
@@ -41,6 +42,7 @@ def fetch_display_image(image_url: str, source_url: str = "") -> bytes | None:
     - redirect 허용
     - image/* Content-Type 또는 대표 이미지 magic byte 검증
     - 개별 6MB 초과 이미지는 메모리 보호를 위해 거부
+    - UI가 오래 멈추지 않도록 요청은 5초 안에 실패 처리
     """
     url = str(image_url or "").strip()
     if not url.startswith(("http://", "https://")):
@@ -60,7 +62,7 @@ def fetch_display_image(image_url: str, source_url: str = "") -> bytes | None:
             "GET",
             url,
             headers=headers,
-            timeout=12.0,
+            timeout=_DISPLAY_TIMEOUT_SECONDS,
             follow_redirects=True,
         ) as response:
             if response.status_code != 200:
