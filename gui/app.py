@@ -48,9 +48,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# -----------------------------------------------------------------------------
-# 사이드바: 실제 업무 순서와 동일하게 고정
-# -----------------------------------------------------------------------------
 st.sidebar.markdown("## 오토셀러 AI")
 st.sidebar.caption("처음부터 끝까지 순서대로 운영")
 
@@ -58,7 +55,9 @@ st.sidebar.markdown("### 🚀 00. 원큐 운영")
 st.sidebar.page_link("pages/01_원큐_운영.py", label="전체 프로세스 한큐 진행", icon="🚀")
 
 st.sidebar.markdown("### 🔌 01. 초기 연동")
-st.sidebar.page_link("pages/20_오너클랜_연동.py", label="공급처 · 오너클랜 연동", icon="🏬")
+st.sidebar.page_link("pages/20_오너클랜_연동.py", label="오너클랜 연동", icon="🏬")
+st.sidebar.page_link("pages/21_도매꾹_연동.py", label="도매꾹 연동", icon="🏷️")
+st.sidebar.page_link("pages/22_온채널_연동.py", label="온채널 연동", icon="🛍️")
 st.sidebar.page_link("pages/05_판매채널_상품동기화.py", label="쿠팡 · 스마트스토어 동기화", icon="🔄")
 
 st.sidebar.markdown("### 📦 02~09. 상품 판매 준비")
@@ -80,9 +79,6 @@ render_sidebar_help()
 st.sidebar.markdown("---")
 st.sidebar.page_link("pages/90_사용자_매뉴얼.py", label="전체 사용자 매뉴얼", icon="📘")
 
-# -----------------------------------------------------------------------------
-# 홈: 원큐 운영을 첫 진입점으로 고정
-# -----------------------------------------------------------------------------
 st.markdown("### 🚀 가장 빠른 시작")
 with st.container(border=True):
     left, right = st.columns([3, 1])
@@ -109,9 +105,11 @@ st.markdown("### 🧩 세부 작업 화면")
 a, b, c = st.columns(3)
 with a:
     with st.container(border=True):
-        st.markdown("#### ① 연결 · 상품 확보")
-        st.write("판매채널 기존상품과 공급처 상품을 내부 기준으로 모읍니다.")
-        st.page_link("pages/20_오너클랜_연동.py", label="오너클랜 연결", icon="🏬", use_container_width=True)
+        st.markdown("#### ① 공급처 · 판매채널 연결")
+        st.write("오너클랜·도매꾹·온채널 상품을 연결하고 쿠팡·스마트스토어 기존상품을 동기화합니다.")
+        st.page_link("pages/20_오너클랜_연동.py", label="오너클랜", icon="🏬", use_container_width=True)
+        st.page_link("pages/21_도매꾹_연동.py", label="도매꾹", icon="🏷️", use_container_width=True)
+        st.page_link("pages/22_온채널_연동.py", label="온채널", icon="🛍️", use_container_width=True)
         st.page_link("pages/05_판매채널_상품동기화.py", label="판매상품 동기화", icon="🔄", use_container_width=True)
 with b:
     with st.container(border=True):
