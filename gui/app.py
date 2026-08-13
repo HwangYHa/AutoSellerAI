@@ -12,11 +12,21 @@ import streamlit as st
 
 from app.orchestration.oneclick import get_next_stage, get_process_status
 from app.policies.runtime_patch import apply_fulfillment_policy_patch
+from app.services.data_graph import ensure_data_graph_schema, reconcile_data_graph
+from app.services.procurement_safety import ensure_procurement_guard
 from gui.help_center import render_sidebar_help
 from gui.korean_runtime import apply_korean_patch
 
 apply_korean_patch()
 apply_fulfillment_policy_patch()
+ensure_data_graph_schema()
+ensure_procurement_guard()
+
+# 앱 시작 시 외부 API 호출 없이 로컬 데이터 관계만 가볍게 복구한다.
+try:
+    reconcile_data_graph(fetch_remote_identities=False)
+except Exception:
+    pass
 
 st.set_page_config(
     page_title="오토셀러 AI",
@@ -38,9 +48,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# -----------------------------------------------------------------------------
-# 사이드바: 같은 기능을 두 번 노출하지 않는다.
-# -----------------------------------------------------------------------------
 st.sidebar.markdown("## ⚡ 오토셀러 AI")
 st.sidebar.caption("업무 목적대로 한 번만 노출")
 
@@ -66,9 +73,6 @@ st.sidebar.markdown("---")
 render_sidebar_help()
 st.sidebar.page_link("pages/90_사용자_매뉴얼.py", label="사용자 매뉴얼", icon="📘")
 
-# -----------------------------------------------------------------------------
-# 홈: 기능 카탈로그가 아니라 현재 상태 + 다음 행동을 보여준다.
-# -----------------------------------------------------------------------------
 st.markdown(
     """
     <div class="hub-hero">
@@ -123,5 +127,6 @@ st.markdown("### 운영 규칙")
 st.info(
     "평소에는 **Seller OS**만 사용하세요. 새 상품이 필요할 때만 **통합 상품 소싱**, "
     "인증정보가 바뀌거나 동기화 오류가 있을 때만 **연동 설정**을 사용합니다. "
-    "공급처별 연동 페이지는 설정/진단용이며 일상 상품관리 메뉴가 아닙니다."
+    "**재고 사입 발주(PurchaseOrder)는 위탁판매 주업무가 아니므로 기본 비활성화**되어 있으며, "
+    "판매채널 주문의 공급처 발주와 별도로 관리합니다."
 )
