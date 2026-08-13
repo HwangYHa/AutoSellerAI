@@ -1,13 +1,9 @@
-"""오토셀러 AI 애플리케이션 허브.
-
-기존 통합 운영 화면과 소셜커머스 기능을 한글 메뉴로 연결한다.
-"""
+"""오토셀러 AI 애플리케이션 허브 — 실제 판매 업무 순서 중심 내비게이션."""
 from __future__ import annotations
 
 import os
 import sys
 
-# `streamlit run gui/app.py`로 직접 실행해도 프로젝트 루트 패키지를 찾도록 보장한다.
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
@@ -31,12 +27,12 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-    .block-container {max-width: 1180px; padding-top: 2rem;}
+    .block-container {max-width:1180px;padding-top:2rem}
     .hub-hero {background:linear-gradient(135deg,#111827,#312E81 55%,#6D28D9);color:#fff;
       border-radius:20px;padding:28px 32px;margin-bottom:22px;box-shadow:0 16px 44px rgba(49,46,129,.2)}
-    .hub-hero h1{margin:0;font-size:30px;font-weight:850}.hub-hero p{margin:8px 0 0;color:rgba(255,255,255,.7)}
+    .hub-hero h1{margin:0;font-size:30px;font-weight:850}.hub-hero p{margin:8px 0 0;color:rgba(255,255,255,.75)}
     .area{border:1px solid #E2E8F0;border-radius:16px;padding:18px;background:#fff;margin-bottom:14px}
-    .area h3{margin:0 0 6px}.muted{color:#64748B;font-size:13px}
+    .muted{color:#64748B;font-size:13px}
     </style>
     """,
     unsafe_allow_html=True,
@@ -46,75 +42,88 @@ st.markdown(
     """
     <div class="hub-hero">
       <h1>⚡ 오토셀러 AI</h1>
-      <p>상품 수집·등록·주문 운영과 AI 소셜커머스를 하나의 판매 운영 시스템에서 관리합니다.</p>
+      <p>처음 설정부터 상품 수집·등록·주문·발주·배송·정산·광고·수익학습까지 한 흐름으로 운영합니다.</p>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
+# -----------------------------------------------------------------------------
+# 사이드바: 실제 업무 순서와 동일하게 고정
+# -----------------------------------------------------------------------------
 st.sidebar.markdown("## 오토셀러 AI")
-st.sidebar.caption("통합 판매 운영 메뉴")
-st.sidebar.markdown("### 🧭 운영")
-st.sidebar.page_link("pages/00_AutoSeller_Main.py", label="통합 운영 화면", icon="⚡")
-st.sidebar.page_link("pages/05_판매채널_상품동기화.py", label="판매채널 상품 동기화", icon="🔄")
-st.sidebar.page_link("pages/25_AI_상세페이지_제작.py", label="상품 이미지 · AI 상세페이지", icon="🖼️")
-st.sidebar.markdown("### 🏭 공급처")
-st.sidebar.page_link("pages/20_오너클랜_연동.py", label="오너클랜 연동", icon="🏬")
-st.sidebar.markdown("### 🛒 소셜커머스")
+st.sidebar.caption("처음부터 끝까지 순서대로 운영")
+
+st.sidebar.markdown("### 🚀 00. 원큐 운영")
+st.sidebar.page_link("pages/01_원큐_운영.py", label="전체 프로세스 한큐 진행", icon="🚀")
+
+st.sidebar.markdown("### 🔌 01. 초기 연동")
+st.sidebar.page_link("pages/20_오너클랜_연동.py", label="공급처 · 오너클랜 연동", icon="🏬")
+st.sidebar.page_link("pages/05_판매채널_상품동기화.py", label="쿠팡 · 스마트스토어 동기화", icon="🔄")
+
+st.sidebar.markdown("### 📦 02~09. 상품 판매 준비")
+st.sidebar.page_link("pages/00_AutoSeller_Main.py", label="상품 수집 · 선별 · SEO · 가격 · 등록", icon="⚡")
+st.sidebar.page_link("pages/25_AI_상세페이지_제작.py", label="이미지 · AI 상세페이지", icon="🖼️")
+
+st.sidebar.markdown("### 🚚 10~13. 주문 운영")
+st.sidebar.page_link("pages/00_AutoSeller_Main.py", label="주문 · 발주 · 송장 · 정산", icon="📦")
+
+st.sidebar.markdown("### 🧵 14. 소셜 판매")
 st.sidebar.page_link("pages/10_Social_Commerce_Threads.py", label="스레드 운영센터", icon="🧵")
-st.sidebar.page_link("pages/11_Threads_Growth_Automation.py", label="성장 자동화", icon="📈")
+st.sidebar.page_link("pages/11_Threads_Growth_Automation.py", label="콘텐츠 · 성장 자동화", icon="📈")
+
+st.sidebar.markdown("### 💹 15. 수익 학습")
 st.sidebar.page_link("pages/12_Threads_Profit_Intelligence.py", label="수익 인텔리전스", icon="💹")
+
 st.sidebar.markdown("---")
 render_sidebar_help()
 st.sidebar.markdown("---")
-st.sidebar.caption("스레드: 콘텐츠 → 게시 → 댓글 영업 → 클릭 → 구매 귀속 → 순이익 학습")
+st.sidebar.page_link("pages/90_사용자_매뉴얼.py", label="전체 사용자 매뉴얼", icon="📘")
 
-render_process_overview(expanded=True)
+# -----------------------------------------------------------------------------
+# 홈: 원큐 운영을 첫 진입점으로 고정
+# -----------------------------------------------------------------------------
+st.markdown("### 🚀 가장 빠른 시작")
+with st.container(border=True):
+    left, right = st.columns([3, 1])
+    with left:
+        st.markdown("#### 전체 프로세스 한큐 운영")
+        st.write("현재 상태를 자동 진단하고, 완료된 단계는 건너뛰며 다음 필요한 단계부터 01→15 순서로 안내합니다. 조회·동기화 작업은 안전하게 한 번에 실행하고 실제 상품등록·공급처 발주는 승인 후 실행합니다.")
+    with right:
+        st.page_link("pages/01_원큐_운영.py", label="🚀 원큐 운영 시작", use_container_width=True)
 
-st.markdown("### 🚀 어디서 시작하면 되나요?")
-start1, start2, start3 = st.columns(3)
-with start1:
+st.markdown("### 🧭 전체 프로세스")
+process_names = [
+    "01 초기 설정/API", "02 기존상품 동기화", "03 공급처 수집", "04 AI 상품 선별",
+    "05 이미지 수집", "06 AI 상세페이지", "07 SEO·GEO·AEO", "08 가격·순이익",
+    "09 판매채널 등록", "10 주문 수집", "11 공급처 발주", "12 송장·배송",
+    "13 정산·순이익", "14 스레드 판매", "15 구매귀속·수익학습",
+]
+for start in range(0, len(process_names), 5):
+    cols = st.columns(5)
+    for col, label in zip(cols, process_names[start:start + 5]):
+        with col:
+            st.markdown(f"**{label}**")
+
+st.markdown("### 🧩 세부 작업 화면")
+a, b, c = st.columns(3)
+with a:
     with st.container(border=True):
-        st.markdown("#### ① 처음 설정")
-        st.write("판매채널·공급처·AI·스레드 인증정보를 먼저 준비합니다.")
-        st.page_link("pages/20_오너클랜_연동.py", label="오너클랜 판매사 API 연결", icon="🏬", use_container_width=True)
-        st.page_link("pages/90_사용자_매뉴얼.py", label="초기 설정 방법", icon="🔐", use_container_width=True)
-with start2:
+        st.markdown("#### ① 연결 · 상품 확보")
+        st.write("판매채널 기존상품과 공급처 상품을 내부 기준으로 모읍니다.")
+        st.page_link("pages/20_오너클랜_연동.py", label="오너클랜 연결", icon="🏬", use_container_width=True)
+        st.page_link("pages/05_판매채널_상품동기화.py", label="판매상품 동기화", icon="🔄", use_container_width=True)
+with b:
     with st.container(border=True):
-        st.markdown("#### ② 상품 판매 운영")
-        st.write("판매자센터 직접 등록 상품을 먼저 동기화한 뒤, 상품 수집 → 이미지 확인 → 검색 최적화 → 등록 → 주문·배송·정산을 진행합니다.")
-        st.page_link("pages/05_판매채널_상품동기화.py", label="판매채널 상품 동기화", icon="🔄", use_container_width=True)
-        st.page_link("pages/25_AI_상세페이지_제작.py", label="상품 이미지 · 상세페이지 확인", icon="🖼️", use_container_width=True)
-        st.page_link("pages/00_AutoSeller_Main.py", label="통합 운영 시작", icon="⚡", use_container_width=True)
-with start3:
+        st.markdown("#### ② 판매 준비 · 주문 운영")
+        st.write("상품 선별 → 이미지 → SEO → 가격 → 등록 → 주문 → 발주 → 배송 → 정산을 처리합니다.")
+        st.page_link("pages/25_AI_상세페이지_제작.py", label="이미지 · 상세페이지", icon="🖼️", use_container_width=True)
+        st.page_link("pages/00_AutoSeller_Main.py", label="통합 판매 운영", icon="⚡", use_container_width=True)
+with c:
     with st.container(border=True):
-        st.markdown("#### ③ 소셜 판매 자동화")
-        st.write("상품 등록 후 스레드 콘텐츠·댓글 영업·구매 귀속·수익 학습을 연결합니다.")
-        st.page_link("pages/10_Social_Commerce_Threads.py", label="스레드 운영 시작", icon="🧵", use_container_width=True)
+        st.markdown("#### ③ 광고 · 수익 학습")
+        st.write("스레드 콘텐츠와 추적링크를 운영하고 실제 순이익을 다음 콘텐츠 전략에 반영합니다.")
+        st.page_link("pages/10_Social_Commerce_Threads.py", label="스레드 운영", icon="🧵", use_container_width=True)
+        st.page_link("pages/12_Threads_Profit_Intelligence.py", label="수익 학습", icon="💹", use_container_width=True)
 
-st.markdown("### 🧩 주요 기능")
-left, right = st.columns(2, gap="large")
-with left:
-    st.markdown('<div class="area"><h3>⚡ 통합 운영</h3><div class="muted">오토셀러AI의 대시보드, 파이프라인, 상품, 검색 최적화, 주문, 정산, 재고, 알림, 스케줄러, 설정을 사용합니다.</div></div>', unsafe_allow_html=True)
-    st.page_link("pages/20_오너클랜_연동.py", label="오너클랜 상품·주문 API", icon="🏬", use_container_width=True)
-    st.page_link("pages/05_판매채널_상품동기화.py", label="쿠팡·스마트스토어 상품 가져오기", icon="🔄", use_container_width=True)
-    st.page_link("pages/25_AI_상세페이지_제작.py", label="원본 이미지 수집 · AI 상세페이지", icon="🖼️", use_container_width=True)
-    st.page_link("pages/00_AutoSeller_Main.py", label="통합 운영 화면 열기", icon="➡️", use_container_width=True)
-
-with right:
-    st.markdown('<div class="area"><h3>🛒 소셜커머스 → 스레드</h3><div class="muted">현황판 · 콘텐츠 · 게시물 · 댓글 · 구매 가능 고객 · AI 답글함 · 자동화 · 연동 설정과 순이익 기반 학습을 관리합니다.</div></div>', unsafe_allow_html=True)
-    st.page_link("pages/10_Social_Commerce_Threads.py", label="스레드 운영센터", icon="🧵", use_container_width=True)
-    st.page_link("pages/11_Threads_Growth_Automation.py", label="AI 콘텐츠·예약·추적·구매 귀속", icon="📈", use_container_width=True)
-    st.page_link("pages/12_Threads_Profit_Intelligence.py", label="게시물·캠페인 순이익 / 콘텐츠 점수", icon="💹", use_container_width=True)
-    st.page_link("pages/90_사용자_매뉴얼.py", label="전체 사용자 매뉴얼", icon="📘", use_container_width=True)
-
-st.markdown("### 🚦 스레드 자동화 단계")
-steps = st.columns(6)
-for col, title, desc in zip(
-    steps,
-    ["1. 계정 연동", "2. AI 콘텐츠", "3. 예약·미디어", "4. AI 영업", "5. 구매 귀속", "6. 순이익 학습"],
-    ["메타 계정 인증 / 60일 토큰", "상품 데이터 기반 생성", "텍스트·이미지·영상", "댓글 분류·답글", "스마트스토어·쿠팡", "콘텐츠 점수 → 다음 전략"],
-):
-    with col:
-        st.markdown(f"**{title}**")
-        st.caption(desc)
+render_process_overview(expanded=False)
