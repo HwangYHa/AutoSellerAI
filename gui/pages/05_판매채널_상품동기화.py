@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 import streamlit as st
 from sqlalchemy import desc, func, select
 
+from app.config import get_settings
 from app.db import Listing, Product, get_db, init_db
 from app.pipeline import sync_platform_catalog
 from app.platforms.coupang import reset_coupang_uploader
@@ -20,11 +21,82 @@ apply_korean_patch()
 st.set_page_config(page_title="판매채널 상품 동기화 | 오토셀러 AI", page_icon="🔄", layout="wide")
 init_db()
 
+
+def _normalized_naver_secret(value: str) -> str:
+    """Docker Compose의 $$ 이스케이프까지 고려해 Commerce API secret을 정규화한다."""
+    secret = (value or "").strip().strip('"').strip("'")
+    if secret.startswith("$$"):
+        secret = secret.replace("$$", "$")
+    return secret
+
+
+def _naver_commerce_preflight() -> dict:
+    """네이버 Commerce API 전자서명에 필요한 자격증명을 로컬에서 선검증한다.
+
+    Commerce API client_secret은 일반 문자열이 아니라 네이버가 발급한 bcrypt salt
+    ($2a$/$2b$/$2y$ + cost + 22자 salt)여야 한다. 실제 secret은 화면에 노출하지 않는다.
+    """
+    s = get_settings()
+    client_id = (s.naver_client_id or "").strip()
+    secret = _normalized_naver_secret(s.naver_client_secret)
+    search_id = (s.naver_search_client_id or "").strip()
+
+    problems: list[str] = []
+    if not client_id:
+        problems.append("NAVER_CLIENT_ID가 비어 있습니다.")
+    if not secret:
+        problems.append("NAVER_CLIENT_SECRET이 비어 있습니다.")
+
+    # bcrypt salt는 총 29자: $2a$10$ + 22자 salt. 네이버 발급값은 이 형태다.
+    valid_prefix = secret.startswith(("$2a$", "$2b$", "$2y$"))
+    valid_length = len(secret) == 29
+    if secret and not (valid_prefix and valid_length):
+        problems.append(
+            "NAVER_CLIENT_SECRET이 Commerce API용 bcrypt salt 형식이 아닙니다. "
+            "네이버 커머스 API 센터에서 발급한 Client Secret($2a$... 형태)을 사용하세요."
+        )
+
+    if client_id and search_id and client_id == search_id and not (valid_prefix and valid_length):
+        problems.append(
+            "NAVER_CLIENT_ID가 NAVER_SEARCH_CLIENT_ID와 동일합니다. "
+            "네이버 검색 API 자격증명을 Commerce API 자격증명으로 재사용한 것으로 보입니다."
+        )
+
+    return {
+        "ok": not problems,
+        "client_id_masked": (client_id[:4] + "***" + client_id[-3:]) if len(client_id) > 8 else ("설정됨" if client_id else "미설정"),
+        "secret_format": "정상(bcrypt salt)" if secret and valid_prefix and valid_length else "잘못됨",
+        "problems": problems,
+    }
+
+
 st.markdown("## 🔄 판매채널 상품 동기화")
 st.caption(
     "쿠팡 Wing 또는 스마트스토어 판매자센터에서 직접 등록·수정한 상품을 "
     "AutoSellerAI 내부 상품관리로 가져옵니다. 이 기능은 판매채널의 상품을 읽기만 하며, 동기화 버튼만으로 외부 상품을 수정하지 않습니다."
 )
+
+naver_check = _naver_commerce_preflight()
+with st.container(border=True):
+    st.markdown("### 🔐 스마트스토어 Commerce API 인증 점검")
+    a, b = st.columns(2)
+    a.metric("Commerce Client ID", naver_check["client_id_masked"])
+    b.metric("Client Secret 형식", naver_check["secret_format"])
+    if naver_check["ok"]:
+        st.success("네이버 Commerce API 전자서명용 자격증명 형식이 정상입니다.")
+    else:
+        for problem in naver_check["problems"]:
+            st.error(problem)
+        st.code(
+            "# 반드시 네이버 '커머스 API 센터'에서 발급한 한 쌍을 입력\n"
+            "NAVER_CLIENT_ID=Commerce_API_애플리케이션_ID\n"
+            "NAVER_CLIENT_SECRET=$2a$...Commerce_API_Client_Secret\n\n"
+            "# 네이버 검색 API 키는 별도 유지\n"
+            "NAVER_SEARCH_CLIENT_ID=검색_API_Client_ID\n"
+            "NAVER_SEARCH_CLIENT_SECRET=검색_API_Client_Secret",
+            language="bash",
+        )
+        st.caption(".env 수정 후 Streamlit을 완전히 종료(Ctrl+C)하고 다시 실행하세요.")
 
 with st.container(border=True):
     st.markdown("### 동기화 실행")
@@ -34,9 +106,20 @@ with st.container(border=True):
     )
 
     c1, c2, c3 = st.columns(3)
-    run_ss = c1.button("🟢 스마트스토어 동기화", type="primary", use_container_width=True)
+    run_ss = c1.button(
+        "🟢 스마트스토어 동기화",
+        type="primary",
+        use_container_width=True,
+        disabled=not naver_check["ok"],
+        help="Commerce API 자격증명 형식이 정상이어야 실행할 수 있습니다." if not naver_check["ok"] else None,
+    )
     run_cp = c2.button("🟠 쿠팡 동기화", type="primary", use_container_width=True)
-    run_all = c3.button("🔄 두 채널 모두 동기화", use_container_width=True)
+    run_all = c3.button(
+        "🔄 두 채널 모두 동기화",
+        use_container_width=True,
+        disabled=not naver_check["ok"],
+        help="스마트스토어 Commerce API 인증정보를 먼저 수정하세요." if not naver_check["ok"] else None,
+    )
 
 
 def _run(platform: str) -> dict:
@@ -50,7 +133,17 @@ def _run(platform: str) -> dict:
 
 def _show_result(platform_name: str, result: dict) -> None:
     if not result.get("ok"):
-        st.error(f"{platform_name} 동기화 실패: {result.get('error', '알 수 없는 오류')}")
+        error = str(result.get("error", "알 수 없는 오류"))
+        if platform_name == "스마트스토어" and "Invalid salt" in error:
+            st.error(
+                "스마트스토어 인증서명 생성 실패: NAVER_CLIENT_SECRET이 Commerce API용 bcrypt salt가 아닙니다."
+            )
+            st.warning(
+                "네이버 검색 API(Client ID/Secret)와 Commerce API(Client ID/Secret)는 용도가 다릅니다. "
+                "커머스 API 센터에서 발급한 Client ID와 `$2a$...` 형태의 Client Secret 한 쌍을 `.env`에 입력하세요."
+            )
+        else:
+            st.error(f"{platform_name} 동기화 실패: {error}")
         st.caption("401/403이면 API 인증·권한을, 400이면 요청값/판매자 ID를 확인하세요. 오류 문구를 그대로 복사해 전달하면 원인을 추적할 수 있습니다.")
         return
 
