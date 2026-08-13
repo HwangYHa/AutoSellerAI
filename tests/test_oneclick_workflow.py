@@ -3,31 +3,35 @@ from app.orchestration import oneclick
 
 def test_workflow_is_strictly_ordered_end_to_end():
     stages = oneclick.WORKFLOW_STAGES
-    assert [s.order for s in stages] == list(range(1, 16))
+    assert [s.order for s in stages] == list(range(1, 9))
     assert [s.key for s in stages] == [
-        "connections", "market_sync", "collect", "select", "images",
-        "ai_detail", "seo", "pricing", "listing", "orders",
-        "fulfillment", "invoice", "settlement", "threads", "learning",
+        "connections", "acquire", "prepare", "listing",
+        "orders", "fulfillment", "settlement", "growth",
     ]
 
 
-def test_irreversible_or_paid_steps_are_not_safe_auto():
+def test_irreversible_steps_are_not_safe_auto():
     by_key = {s.key: s for s in oneclick.WORKFLOW_STAGES}
     assert by_key["listing"].approval_required is True
     assert by_key["listing"].safe_auto is False
     assert by_key["fulfillment"].approval_required is True
     assert by_key["fulfillment"].safe_auto is False
-    assert by_key["ai_detail"].optional is True
-    assert by_key["ai_detail"].safe_auto is False
+    assert by_key["growth"].optional is True
 
 
-def test_safe_oneclick_runs_only_read_sync_and_image_refresh(monkeypatch):
+def test_naver_commerce_secret_validation():
+    assert oneclick._valid_naver_commerce_secret("$2a$04$1234567890123456789012") is True
+    assert oneclick._valid_naver_commerce_secret("$$2a$$04$$1234567890123456789012") is True
+    assert oneclick._valid_naver_commerce_secret("normal-secret") is False
+
+
+def test_safe_oneclick_runs_read_sync_and_image_refresh(monkeypatch):
     calls = []
 
     def fake_sync():
         calls.append("market_sync")
         return {
-            "smartstore": {"ok": True, "total_found": 0},
+            "smartstore": {"ok": False, "error": "not configured"},
             "coupang": {"ok": True, "total_found": 0},
         }
 
@@ -38,7 +42,7 @@ def test_safe_oneclick_runs_only_read_sync_and_image_refresh(monkeypatch):
     fake_status = {
         "progress": 0.0,
         "completed_required": 0,
-        "required_total": 12,
+        "required_total": 7,
         "connections": {},
         "counts": {},
         "stages": [
@@ -51,6 +55,7 @@ def test_safe_oneclick_runs_only_read_sync_and_image_refresh(monkeypatch):
     monkeypatch.setattr(oneclick, "get_process_status", lambda: fake_status)
 
     result = oneclick.run_safe_oneclick()
+    # 한 채널이 성공하면 성공한 동기화 결과를 유지한다.
     assert result["ok"] is True
     assert calls == ["market_sync", "images"]
     assert result["next_stage"]["key"] == "connections"
@@ -59,7 +64,7 @@ def test_safe_oneclick_runs_only_read_sync_and_image_refresh(monkeypatch):
 def test_next_stage_skips_optional_until_required_are_done():
     status = {
         "stages": [
-            {"key": "ai_detail", "optional": True, "done": False},
+            {"key": "growth", "optional": True, "done": False},
             {"key": "listing", "optional": False, "done": False},
         ]
     }
