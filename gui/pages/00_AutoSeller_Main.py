@@ -13,9 +13,11 @@ from sqlalchemy import func
 
 from app.db import Order, PlatformOrder, SettlementPeriod, get_db, init_db
 from app.orchestration.oneclick import get_next_stage, get_process_status
-from app.pipeline import collect_platform_orders, register_invoice_to_platform
+from app.pipeline import register_invoice_to_platform
 from app.policies.runtime_patch import apply_fulfillment_policy_patch
+from app.services.background_jobs import clear_background_job, get_background_job, submit_background_job
 from app.services.data_graph import get_data_graph_health, reconcile_data_graph
+from app.services.maintenance_tasks import collect_orders_and_reconcile_task, reconcile_data_graph_task
 from app.services.procurement_safety import (
     cancel_latest_local_purchase_order,
     ensure_procurement_guard,
@@ -29,6 +31,7 @@ apply_fulfillment_policy_patch()
 init_db()
 ensure_procurement_guard()
 try:
+    # 로컬 관계 정리는 빠르고 외부 네트워크를 쓰지 않는다.
     reconcile_data_graph(fetch_remote_identities=False)
 except Exception:
     pass
@@ -52,6 +55,32 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+
+def _render_background_job(state_key: str, success_message: str) -> bool:
+    job_id = st.session_state.get(state_key)
+    job = get_background_job(job_id)
+    if not job:
+        return False
+    if job["status"] in {"queued", "running"}:
+        left, right = st.columns([4.5, 1])
+        left.info(
+            f"⏳ {job['name']} · {'대기 중' if job['status'] == 'queued' else '실행 중'} · "
+            "브라우저 연결과 분리되어 실행됩니다."
+        )
+        right.button("상태 새로고침", key=f"refresh_{state_key}", use_container_width=True)
+        return True
+    if job["status"] == "success":
+        st.success(success_message)
+        if job.get("result") is not None:
+            st.json(job["result"], expanded=False)
+    else:
+        st.error(f"{job['name']} 실패: {job.get('error', '알 수 없는 오류')}")
+    if st.button("작업 결과 닫기", key=f"close_{state_key}"):
+        clear_background_job(job_id)
+        st.session_state.pop(state_key, None)
+    return False
+
 
 st.markdown(
     """
@@ -91,32 +120,43 @@ with tab_orders:
     st.markdown("### 🚚 주문 · 배송")
     st.caption("판매채널 주문 → 내부 Product → 공급처 → 공급처 주문번호 → 실제 송장 순으로 연결합니다.")
 
+    order_job_active = _render_background_job("seller_order_sync_job", "주문 수집 및 상품 관계 연결 완료")
     a, b, c = st.columns([1.3, 1.3, 3.4])
     hours = a.selectbox("수집 범위", [3, 12, 24, 72, 168], index=2, format_func=lambda x: f"최근 {x}시간")
-    if b.button("🔄 신규 주문 수집", type="primary", use_container_width=True):
-        with st.spinner("쿠팡·스마트스토어 주문과 상품 식별자를 연결하는 중..."):
-            try:
-                result = collect_platform_orders(hours_back=int(hours))
-                graph_result = reconcile_data_graph(fetch_remote_identities=True)
-                st.success("주문 수집 및 상품 관계 연결 완료")
-                st.json({"orders": result, "links": graph_result}, expanded=False)
-            except Exception as exc:
-                st.error(f"주문 수집 실패: {exc}")
-    c.info("재고 사입 발주와 고객 주문의 공급처 발주는 서로 다른 기능입니다. 위탁판매에서는 고객 주문 단위 발주만 정상 운영 흐름에 사용합니다.")
+    if b.button("🔄 신규 주문 수집", type="primary", use_container_width=True, disabled=order_job_active):
+        st.session_state["seller_order_sync_job"] = submit_background_job(
+            "판매채널 주문 수집 · 상품 관계 연결",
+            collect_orders_and_reconcile_task,
+            int(hours),
+        )
+        st.success("주문 수집을 백그라운드에서 시작했습니다. 다른 화면으로 이동해도 계속 실행됩니다.")
+    c.info("재고 사입 발주와 고객 주문의 공급처 발주는 서로 다른 기능입니다. 위탁판매에서는 고객 주문 단위 발주만 사용합니다.")
 
     graph_health = get_data_graph_health()
     if graph_health.get("unlinked_platform_orders", 0):
-        st.warning(f"내부 상품과 아직 연결되지 않은 주문이 {graph_health['unlinked_platform_orders']}건 있습니다. ‘연동 · 시스템’에서 데이터 관계 동기화를 실행하세요.")
+        st.warning(f"내부 상품과 아직 연결되지 않은 주문이 {graph_health['unlinked_platform_orders']}건 있습니다.")
 
+    status_filter = st.selectbox("주문 상태", ["전체", "new", "fulfilling", "shipped", "completed", "cancelled"])
+    order_page_size = 25
     with get_db() as db:
-        orders = db.query(PlatformOrder).order_by(PlatformOrder.ordered_at.desc()).limit(100).all()
+        oq = db.query(PlatformOrder)
+        if status_filter != "전체":
+            oq = oq.filter(PlatformOrder.status == status_filter)
+        order_total = int(oq.count())
+        order_pages = max(1, (order_total + order_page_size - 1) // order_page_size)
+        order_page = int(st.number_input("주문 페이지", min_value=1, max_value=order_pages, value=1, step=1))
+        orders = (
+            oq.order_by(PlatformOrder.ordered_at.desc(), PlatformOrder.id.desc())
+            .offset((order_page - 1) * order_page_size)
+            .limit(order_page_size)
+            .all()
+        )
 
+    st.caption(f"주문 {order_total}건 · 페이지 {order_page}/{order_pages} · 한 번에 최대 {order_page_size}건 표시")
     if not orders:
         st.info("수집된 주문이 없습니다.")
     else:
-        status_filter = st.selectbox("주문 상태", ["전체", "new", "fulfilling", "shipped", "completed", "cancelled"])
-        visible = [o for o in orders if status_filter == "전체" or o.status == status_filter]
-        for order in visible:
+        for order in orders:
             with st.container(border=True):
                 left, center, right = st.columns([1.1, 4.3, 1.6], vertical_alignment="center")
                 left.markdown(f"**{order.platform.upper()}**")
@@ -146,13 +186,12 @@ with tab_orders:
                                 result = register_invoice_to_platform(order.id, delivery_company.strip(), tracking.strip())
                                 if result.get("ok"):
                                     st.success("판매채널 송장 등록 완료")
-                                    st.rerun()
                                 else:
                                     st.error(result.get("error", "송장 등록 실패"))
 
 with tab_profit:
     st.markdown("### 💰 수익")
-    st.caption("예상마진은 상품에서, 실제 주문·정산 결과는 여기서 봅니다. Order.product_id도 판매채널 주문과 자동 연결합니다.")
+    st.caption("예상마진은 상품에서, 실제 주문·정산 결과는 여기서 봅니다.")
     with get_db() as db:
         order_count = db.query(Order).count()
         revenue = float(db.query(func.coalesce(func.sum(Order.gross_revenue), 0)).scalar() or 0)
@@ -198,18 +237,20 @@ with tab_system:
     c4.metric("AI", "설정됨" if checks.get("ai") else "확인 필요")
 
     st.markdown("#### 🔗 데이터 관계")
+    graph_job_active = _render_background_job("seller_graph_job", "데이터 관계 동기화 완료")
     health = get_data_graph_health()
     h1, h2, h3, h4 = st.columns(4)
     h1.metric("판매채널 식별자", health["marketplace_identities"])
     h2.metric("미연결 주문", health["unlinked_platform_orders"])
     h3.metric("미연결 공급처 원본", health["supplier_raw_unlinked"])
     h4.metric("미연결 워크플로", health["workflow_unlinked"])
-    if st.button("🔗 데이터 관계 전체 동기화", type="primary", use_container_width=True):
-        with st.spinner("쿠팡/스마트스토어 식별자와 공급처·주문·정산 관계를 다시 연결하는 중..."):
-            result = reconcile_data_graph(fetch_remote_identities=True)
-        st.success("데이터 관계 동기화 완료")
-        st.json(result, expanded=False)
-        st.rerun()
+    if st.button("🔗 데이터 관계 전체 동기화", type="primary", use_container_width=True, disabled=graph_job_active):
+        st.session_state["seller_graph_job"] = submit_background_job(
+            "데이터 관계 전체 동기화",
+            reconcile_data_graph_task,
+            True,
+        )
+        st.success("관계 동기화를 백그라운드에서 시작했습니다.")
 
     st.markdown("#### 🚨 재고 사입 안전")
     st.info("위탁판매에서는 ‘전체 재고 발주’를 사용하지 않습니다. 재고 사입 PurchaseOrder 신규 생성은 기본적으로 DB 단계에서 차단합니다.")
@@ -222,7 +263,6 @@ with tab_system:
             if result.get("ok"):
                 st.success(f"{result['po_number']} 취소 완료 · 입고예정 수량도 원복했습니다.")
                 st.json(result, expanded=False)
-                st.rerun()
             else:
                 st.warning(result.get("error", "취소 가능한 발주가 없습니다."))
     else:
