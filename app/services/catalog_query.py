@@ -6,20 +6,13 @@ current page is converted to UI rows.
 """
 from __future__ import annotations
 
-from sqlalchemy import and_, func, or_
+from sqlalchemy import and_, exists, func, or_, select
 
 from app.db import Listing, Product, get_db
 from app.services.product_catalog import SUPPLIER_SOURCES, _listing_map, _product_row
 
-_EMPTY_IMAGES = (None, "", "[]", "null", "None")
-
 
 def _needs_action_condition():
-    failed_listing_exists = (
-        get_db  # keep import grouping stable for static tooling
-    )
-    # SQLAlchemy exists() via relationship-free tables.
-    from sqlalchemy import exists, select
     failed = exists(select(Listing.id).where(
         Listing.product_id == Product.id,
         Listing.status == "failed",
