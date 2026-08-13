@@ -2,7 +2,7 @@
 
 외부 공급처/CDN 이미지를 브라우저가 직접 요청하면 Referer/핫링크 정책 때문에
 URL은 정상이어도 Streamlit에서 깨질 수 있다. UI에서는 서버가 먼저 이미지를 받아
-bytes로 렌더링하고, 실패할 때만 원본 URL 렌더링 또는 placeholder로 폴백한다.
+bytes로 렌더링하고, 실패하면 placeholder로 처리한다.
 
 이 모듈은 DB의 원본 이미지 URL을 바꾸지 않는다.
 """
@@ -17,7 +17,8 @@ _BROWSER_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
 )
-_MAX_IMAGE_BYTES = 15 * 1024 * 1024
+# 목록 화면에서 수백 MB가 메모리에 쌓이지 않도록 개별 이미지와 LRU 개수를 제한한다.
+_MAX_IMAGE_BYTES = 6 * 1024 * 1024
 
 
 def _referer_for(source_url: str, image_url: str) -> str:
@@ -32,14 +33,14 @@ def _referer_for(source_url: str, image_url: str) -> str:
     return ""
 
 
-@lru_cache(maxsize=512)
+@lru_cache(maxsize=96)
 def fetch_display_image(image_url: str, source_url: str = "") -> bytes | None:
     """외부 이미지를 서버에서 받아 bytes로 반환한다.
 
     - 브라우저 UA / Accept / Referer 사용
     - redirect 허용
     - image/* Content-Type 또는 대표 이미지 magic byte 검증
-    - 15MB 초과는 메모리 보호를 위해 거부
+    - 개별 6MB 초과 이미지는 메모리 보호를 위해 거부
     """
     url = str(image_url or "").strip()
     if not url.startswith(("http://", "https://")):
@@ -77,7 +78,6 @@ def fetch_display_image(image_url: str, source_url: str = "") -> bytes | None:
                 return None
             if content_type.startswith("image/"):
                 return data
-            # 일부 CDN은 application/octet-stream으로 내려준다.
             if data.startswith((b"\xff\xd8\xff", b"\x89PNG\r\n\x1a\n", b"GIF87a", b"GIF89a", b"RIFF")):
                 return data
     except Exception:
