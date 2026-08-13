@@ -1,12 +1,11 @@
 """상품관리 화면이 사용하는 단일 카탈로그 서비스.
 
 UI가 Product/Listing 테이블 구조나 공급처별 예외를 직접 알지 않도록
-검색·필터·이미지 정규화·상태 계산을 이 계층에서 한 번에 처리한다.
+검색·필터·이미지 정규화·상태 계산·이미지 재수집을 이 계층에서 처리한다.
 """
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, asdict
 from typing import Any
 
 from sqlalchemy import or_
@@ -24,6 +23,7 @@ SOURCE_LABELS = {
     "smartstore_import": "스마트스토어 직접등록",
 }
 STATUS_LABELS = {"draft": "준비중", "ready": "판매 준비", "listed": "판매중"}
+SUPPLIER_SOURCES = {"domeggook", "domemai", "onchannel", "ownerclan"}
 
 
 def _json_list(raw: str | None) -> list[Any]:
@@ -80,7 +80,7 @@ def _product_row(p: Product, listings: list[dict]) -> dict[str, Any]:
         issues.append("판매가 미설정")
     if failed_channels:
         issues.append("채널 등록 실패")
-    if p.source in {"domeggook", "domemai", "onchannel", "ownerclan"} and float(p.supply_price or 0) <= 0:
+    if p.source in SUPPLIER_SOURCES and float(p.supply_price or 0) <= 0:
         issues.append("공급가 확인 필요")
 
     return {
@@ -122,7 +122,6 @@ def get_catalog(
     page_size: int = 24,
     action_only: bool = False,
 ) -> dict[str, Any]:
-    """상품관리 목록과 필터/요약 데이터를 한 번에 반환한다."""
     page = max(1, int(page))
     page_size = max(6, min(100, int(page_size)))
 
@@ -191,12 +190,7 @@ def get_product_snapshot(product_id: int) -> dict[str, Any] | None:
 
 
 def repair_product_image_urls() -> dict[str, int]:
-    """기존 DB에 저장된 상대/깨진 마켓 이미지 경로를 안전하게 정리한다.
-
-    절대 URL로 복구할 수 있는 쿠팡 cdnPath는 변환하고, 복구 불가능한 파일명만
-    저장된 값은 제거한다. 다음 쿠팡/스마트스토어 동기화가 실행되면 최신 이미지로
-    다시 채워진다.
-    """
+    """기존 DB에 저장된 상대/깨진 마켓 이미지 경로를 안전하게 정리한다."""
     checked = changed = removed = 0
     with get_db() as db:
         products = db.query(Product).all()
@@ -217,6 +211,114 @@ def repair_product_image_urls() -> dict[str, int]:
                 changed += 1
         db.commit()
     return {"checked": checked, "changed": changed, "removed": removed}
+
+
+def refresh_supplier_product_images(
+    product_ids: list[int] | None = None,
+    *,
+    limit: int = 300,
+) -> dict[str, Any]:
+    """공급처 원본을 다시 조회해 대표/상세 이미지를 DB에 갱신한다.
+
+    adapter.get_product()는 registry의 이미지 보완 프록시를 통과하므로 API 이미지뿐 아니라
+    원본 HTML의 img/lazy/srcset/background/JSON 이미지까지 수집한다. 온채널은 로그인
+    세션을 재사용한다.
+    """
+    from app.suppliers.registry import get_adapter
+
+    ids = {int(x) for x in (product_ids or [])}
+    checked = updated = still_missing = 0
+    errors: list[str] = []
+
+    with get_db() as db:
+        q = db.query(Product).filter(Product.source.in_(SUPPLIER_SOURCES))
+        if ids:
+            q = q.filter(Product.id.in_(ids))
+        products = q.order_by(Product.updated_at.desc()).limit(max(1, int(limit))).all()
+
+        for p in products:
+            checked += 1
+            adapter = get_adapter(p.source)
+            if not adapter or not p.source_id:
+                still_missing += 1
+                continue
+            try:
+                normalized = adapter.get_product(str(p.source_id))
+            except Exception as exc:
+                errors.append(f"#{p.id} {p.source}: {exc}")
+                continue
+            if not normalized:
+                errors.append(f"#{p.id} {p.source}: 상품 상세 조회 실패")
+                continue
+
+            changed = False
+            if normalized.raw_url and p.source_url != normalized.raw_url:
+                p.source_url = normalized.raw_url
+                changed = True
+            if normalized.supply_price > 0 and float(p.supply_price or 0) != float(normalized.supply_price):
+                p.supply_price = normalized.supply_price
+                changed = True
+            for attr in ("category", "brand", "origin", "material"):
+                value = str(getattr(normalized, attr, "") or "").strip()
+                if value and getattr(p, attr) != value:
+                    setattr(p, attr, value)
+                    changed = True
+
+            if normalized.images:
+                images_json = json.dumps(normalized.images, ensure_ascii=False)
+                if p.images != images_json:
+                    p.images = images_json
+                    changed = True
+            if normalized.detail_images:
+                details_json = json.dumps(normalized.detail_images, ensure_ascii=False)
+                if p.detail_images != details_json:
+                    p.detail_images = details_json
+                    changed = True
+            if normalized.options:
+                options_json = json.dumps(normalized.options, ensure_ascii=False)
+                if p.options != options_json:
+                    p.options = options_json
+                    changed = True
+
+            if changed:
+                updated += 1
+            if not normalized.images:
+                still_missing += 1
+
+        db.commit()
+
+    return {
+        "checked": checked,
+        "updated": updated,
+        "still_missing": still_missing,
+        "errors": errors[:30],
+    }
+
+
+def repair_all_product_images(*, include_marketplaces: bool = True) -> dict[str, Any]:
+    """Seller OS의 '이미지 복구' 단일 진입점.
+
+    1) DB의 명백히 잘못된 상대 마켓 URL 정리
+    2) 모든 공급처 원본 재조회
+    3) 필요 시 쿠팡/스마트스토어 기존 판매상품 재동기화
+    """
+    local = repair_product_image_urls()
+    suppliers = refresh_supplier_product_images()
+    marketplaces: dict[str, Any] = {}
+
+    if include_marketplaces:
+        try:
+            from app.sync.catalog_sync import sync_coupang_catalog
+            marketplaces["coupang"] = sync_coupang_catalog()
+        except Exception as exc:
+            marketplaces["coupang"] = {"ok": False, "error": str(exc)}
+        try:
+            from app.sync.catalog_sync import sync_smartstore_catalog
+            marketplaces["smartstore"] = sync_smartstore_catalog()
+        except Exception as exc:
+            marketplaces["smartstore"] = {"ok": False, "error": str(exc)}
+
+    return {"local": local, "suppliers": suppliers, "marketplaces": marketplaces}
 
 
 def set_products_status(product_ids: list[int], status: str) -> int:
