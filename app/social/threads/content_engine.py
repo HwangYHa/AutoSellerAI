@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from typing import Any
 
 from app.config import get_settings
+from app.social.threads.copy_quality import marketing_evidence, natural_product_name, sales_copy_score
 from app.social.threads.product_analysis import build_product_evidence, primary_product_image
-from app.social.threads.search_optimization import (
-    build_search_context,
-    fallback_optimized_body,
-    optimization_scores,
-)
+from app.social.threads.search_optimization import build_search_context, optimization_scores
+
+logger = logging.getLogger(__name__)
 
 
 ANGLES = {
@@ -27,8 +27,9 @@ _FEATURE_MARKERS = (
     "접이식", "자동", "저소음", "방수", "세척", "멀티", "올인원", "고속",
     "강력", "컴팩트", "프리미엄", "실리콘", "스테인리스", "ABS",
 )
-
+_ADULT_TERMS = ("성인용품", "자위기구", "바이브레이터", "진동기", "딜도", "섹스토이")
 _HOOK_SUFFIXES = ("찐포인트", "왜핫해", "궁금해", "비교해줘", "실사용팁")
+_ADULT_HOOKS = ("선택팁", "입문팁", "비교포인트", "관리팁", "체크포인트")
 
 
 def _clean_tokens(text: str) -> list[str]:
@@ -36,18 +37,23 @@ def _clean_tokens(text: str) -> list[str]:
 
 
 def _normalize_body(body: str) -> str:
-    """Keep Threads copy readable without turning it into a formal article."""
     text = str(body or "").replace("\r\n", "\n").replace("\r", "\n").strip()
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r" *\n *", "\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
-    # Remove common LLM/article labels that feel unnatural on Threads.
     text = re.sub(r"(?m)^\s*(?:결론|요약|핵심|POINT|포인트)\s*[:：]\s*", "", text)
     return text[:500].strip()
 
 
+def _is_adult_product(product: dict[str, Any]) -> bool:
+    haystack = " ".join(
+        str(product.get(key) or "") for key in ("name", "category", "brand")
+    ).lower()
+    return any(term.lower() in haystack for term in _ADULT_TERMS)
+
+
 def suggest_comment_keyword(product: dict[str, Any]) -> str:
-    """Create a short curiosity hook from facts that actually exist for the product."""
+    """Create a short comment hook without turning SEO terms into an awkward CTA."""
     try:
         evidence = build_product_evidence(product)
         verified = evidence.get("verified") or {}
@@ -62,14 +68,17 @@ def suggest_comment_keyword(product: dict[str, Any]) -> str:
     source = " ".join([name, category, brand, material, option_text])
 
     feature = next((marker for marker in _FEATURE_MARKERS if marker.lower() in source.lower()), "")
+    seed = sum(ord(ch) for ch in (name + category + feature))
+
+    if _is_adult_product({**product, **verified}) and not feature:
+        return _ADULT_HOOKS[seed % len(_ADULT_HOOKS)]
+
     if not feature:
         search_ctx = build_search_context({**product, **verified})
         candidates = list(search_ctx.get("related_keywords") or [])
-        candidates += _clean_tokens(name)
-        candidates += _clean_tokens(category)
+        candidates += _clean_tokens(natural_product_name(verified))
         feature = next((str(x).strip() for x in candidates if str(x).strip()), "상품")
 
-    seed = sum(ord(ch) for ch in (name + category + feature))
     suffix = _HOOK_SUFFIXES[seed % len(_HOOK_SUFFIXES)]
     keyword = re.sub(r"\s+", "", f"{feature}{suffix}")
     return keyword[:20] or "찐포인트"
@@ -78,35 +87,61 @@ def suggest_comment_keyword(product: dict[str, Any]) -> str:
 def _angle_instruction(angle: str) -> str:
     return {
         "problem_solution": (
-            "구매자가 실제로 겪을 법한 불편/고민 하나로 시작한다. 그 문제를 이 상품의 확인된 특징이 "
-            "어떻게 줄일 수 있는지 연결한다. 억지로 문제를 만들거나 만능 해결책처럼 쓰지 않는다."
+            "사람이 실제로 느끼는 작은 불편이나 망설임 하나로 시작한다. 해결책을 과장하지 말고, "
+            "확인된 제품 포인트가 그 상황에서 왜 의미 있는지를 연결한다."
         ),
         "experience": (
-            "직접 써봤다고 거짓말하지 않는다. 대신 친구끼리 상품을 같이 보며 '이런 상황이면 이 포인트가 "
-            "은근 중요하겠다'고 공감하는 방식으로 쓴다. 생활 장면은 일반적인 맥락만 사용한다."
+            "가짜 사용후기는 절대 금지한다. 대신 친구가 제품을 같이 보면서 '이런 상황이면 이 부분부터 볼 것 같다'고 "
+            "말하는 공감형 흐름으로 쓴다. 제품 설명보다 상황과 감정을 먼저 둔다."
         ),
         "question": (
-            "첫 문장을 실제 친구에게 던질 법한 짧은 질문으로 시작한다. 바로 다음 문장에서 답을 주고, "
-            "상품의 확인된 특징 2~3개를 자연스럽게 이어간다. 질문을 연속으로 남발하지 않는다."
+            "친구에게 진짜 물어볼 법한 한 문장 질문으로 시작한다. 질문 직후 바로 핵심 답을 주고, "
+            "제품의 확인된 근거를 1~3개만 자연스럽게 이어간다."
         ),
         "comparison": (
-            "경쟁 상품의 사실을 모르면 특정 타사와 비교하지 않는다. 대신 구매 기준(가격/규격/소재/옵션/사용 목적 등) "
-            "중 확인 가능한 항목을 기준으로 '이런 사람은 이쪽, 저런 사람은 다른 조건 확인'처럼 균형 있게 쓴다."
+            "근거 없는 타사 비교는 금지한다. 대신 '이 조건이 중요한 사람 / 다른 조건이 중요한 사람'처럼 구매 기준을 나눠서 "
+            "독자가 자기 취향을 스스로 고르게 한다."
         ),
         "listicle": (
-            "목록은 3개 정도로 짧게 구성한다. 각 항목은 한 줄 안팎으로, 설명을 길게 늘이지 않는다. "
-            "Threads에서 친구가 체크리스트를 보내주는 느낌을 유지한다."
+            "3개 안팎의 짧은 체크포인트로 쓴다. 각 항목은 정보표가 아니라 친구가 '이것만 봐'라고 짚어주는 한 문장으로 만든다."
         ),
-    }.get(angle, "자연스러운 정보 공유형으로 작성한다.")
+    }.get(angle, "친구가 발견한 제품을 자연스럽게 공유하는 흐름으로 쓴다.")
 
 
 def _model_name(settings) -> str:
-    # A dedicated override makes quality/cost tuning possible without code changes.
     return (
         str(os.getenv("THREADS_CONTENT_MODEL", "") or "").strip()
         or str(getattr(settings, "claude_model_heavy", "") or "").strip()
         or str(settings.claude_model).strip()
     )
+
+
+def _image_urls(evidence: dict[str, Any], limit: int = 2) -> list[str]:
+    verified = evidence.get("verified") or {}
+    rows = [*(verified.get("images") or []), *(verified.get("detail_images") or [])]
+    result: list[str] = []
+    for value in rows:
+        candidates: list[str] = []
+        if isinstance(value, str):
+            candidates = [value]
+        elif isinstance(value, dict):
+            candidates = [str(value.get(k) or "") for k in ("url", "src", "image_url", "imageUrl")]
+        for url in candidates:
+            url = url.strip()
+            if url.startswith("https://") and url not in result:
+                result.append(url)
+                break
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _critical_quality_issue(issues: list[str]) -> bool:
+    critical = {
+        "empty", "internal_sku", "internal_source_id", "internal_code",
+        "numeric_category", "keyword_stuffing", "unsupported_or_template_judgment",
+    }
+    return bool(critical.intersection(issues))
 
 
 def generate_threads_content(
@@ -144,9 +179,11 @@ def generate_threads_content(
         evidence = {"verified": dict(product), "evidence_stats": {}}
         enriched_product = dict(product)
 
+    customer_evidence = marketing_evidence(evidence)
     search_ctx = build_search_context(enriched_product)
     cta_keyword = cta_keyword.strip() or suggest_comment_keyword(enriched_product)
     image_url = primary_product_image(enriched_product)
+    image_urls = _image_urls(evidence, 2)
 
     feedback_text = "실적 데이터 없음"
     if performance_context:
@@ -165,49 +202,50 @@ def generate_threads_content(
             import anthropic
 
             client = anthropic.Anthropic(api_key=settings.claude_api_key)
-            prompt = f"""당신은 한국 Threads에서 활동하는 20~30대 여성 소셜커머스 콘텐츠 크리에이터입니다.
-목표는 '광고를 읽는 느낌'이 아니라 친한 친구가 괜찮아 보이는 상품을 같이 살펴보며 알려주는 느낌입니다.
+            candidate_count = min(10, max(count + 2, count * 2))
+            prompt = f"""당신은 한국 Threads에서 실제로 반응을 만드는 20~30대 여성 소셜커머스 크리에이터입니다.
+목표는 상품정보를 요약하는 것이 아니라, 독자가 '어? 이건 내 얘기인데' 하고 멈춘 뒤 제품을 더 보고 싶게 만드는 것입니다.
 
-[가장 중요한 원칙]
-1. 아래 PRODUCT EVIDENCE에 있는 사실만 상품 사실로 사용합니다.
-2. 저장된 상세정보와 옵션을 가능한 한 꼼꼼히 읽되, 콘텐츠 한 편에 모든 정보를 억지로 욱여넣지 않습니다.
-3. 상세페이지/원문에 없는 기능, 효과, 인증, 후기, 배송일, 할인율, 재고 희소성, 사용 경험은 만들지 않습니다.
-4. supplemental_source_page_text는 원격 페이지 보강 자료일 뿐입니다. 저장된 verified 정보와 충돌하면 verified를 우선합니다.
-5. 실제 사용한 적이 없으므로 '내가 써봤는데', '며칠 써보니', '직접 샀어'처럼 가짜 체험담을 쓰지 않습니다.
+[절대 금지]
+- NEVER_EXPOSE에 있는 SKU, source_id, 숫자 카테고리, 공급가, 내부 상태를 소비자 문장에 쓰지 마세요.
+- 공급처 원본 제목이 SEO 키워드를 길게 나열해도 그대로 복사하지 마세요. display_name을 사용하세요.
+- 가격만 보고 '저렴하다/부담 없다/진입장벽 낮다/입문용이다'라고 평가하지 마세요. 비교 근거가 없습니다.
+- '기본기에 충실', '무난하다', '정품이면 괜찮다', '원산지가 중국이어도 괜찮다' 같은 근거 없는 평가를 만들지 마세요.
+- 확인되지 않은 기능, 소재 안전성, 진동 단계, 방수, 충전 방식, 사이즈, 효과, 인증, 후기, 배송, 할인, 재고를 추측하지 마세요.
+- 'Q. / A.', '찾고 계신가요?', 검색 키워드 나열, 쇼핑몰 SEO 문장을 쓰지 마세요.
+- 같은 CTA를 두 번 쓰지 마세요.
+
+[상품을 보는 방식]
+- PUBLIC_FACTS와 상세 텍스트를 가장 중요한 근거로 사용하세요.
+- 함께 첨부된 상품 이미지는 '눈에 실제로 보이는 사실'만 근거로 사용할 수 있습니다. 예: 색상, 형태, 버튼이 보이는지, 패키지 구성, 외형 디자인.
+- 이미지에서 보이지 않는 기능이나 성능은 추측하지 마세요.
+- LOW_PRIORITY_FACTS의 원산지나 가격은 그 콘텐츠의 핵심 구매 판단에 정말 필요할 때만 씁니다. 매번 넣지 마세요.
+- 정보가 부족하면 부족한 정보를 억지로 언급하며 구매욕을 떨어뜨리지 말고, 확인된 매력 포인트만 좁게 깊게 이야기하세요.
 
 [말투]
-- 20~30대 여성이 친한 친구와 카톡/DM/스레드에서 이야기하듯 씁니다.
-- 문장을 짧게 끊고 필요한 곳에 자연스럽게 줄바꿈합니다.
-- 존댓말 광고 카피, 보도자료, 홈쇼핑 진행자, 쇼핑몰 상세페이지 말투를 피합니다.
-- 억지 유행어, 과한 애교, 느낌표 도배, '무조건', '역대급', '인생템', '대박' 같은 상투적 과장은 최소화합니다.
-- 불필요한 서론/결론/요약 문구를 넣지 않습니다.
-- 같은 뜻을 반복하지 않습니다.
-- 이모지는 정말 어울릴 때만 0~2개 사용합니다.
+- 친구 한 명에게 DM 보내듯 씁니다. 설명문이 아니라 대화입니다.
+- 첫 문장은 상품명이 아니라 상황/감정/호기심으로 시작하는 것을 우선합니다.
+- 20~30대 여성 화자이되 억지 애교, 과한 유행어, 광고회사 카피 느낌은 금지합니다.
+- 짧은 문장, 자연스러운 줄바꿈, 한 문단 1~3문장 정도.
+- 독자가 자기 상황을 떠올리게 하되 가짜 체험담은 쓰지 않습니다.
+- 상품명은 전체 본문에서 보통 0~1회면 충분합니다.
+- 가격·원산지·옵션 개수 같은 DB 필드는 필요할 때만 말하고, 단순 나열하지 않습니다.
 
-[판매 방식]
-- 상품명을 반복해서 외치지 말고, 구매자가 자기 상황에 대입하게 만듭니다.
-- 확인된 특징 → 실제 구매 판단에 왜 중요한지 → 어떤 사람에게 맞을지 순서로 자연스럽게 연결합니다.
-- 장점만 나열하지 말고 확인해야 할 조건/옵션이 있다면 솔직하게 언급합니다.
-- CTA 직전까지는 '사라'고 밀어붙이지 않습니다.
+[판매 흐름]
+상황/욕구/망설임 → 공감 → 제품에서 실제로 확인되는 포인트 → 그 포인트가 왜 신경 쓰일 만한지 → 부담 없는 CTA.
+'구매하세요'라고 밀지 말고, 독자가 스스로 더 보고 싶게 만드세요.
 
 [선택한 유형: {ANGLES[angle]}]
 {_angle_instruction(angle)}
 
-[구성]
-- 500자 이하.
-- 보통 3~6개의 짧은 문단. 문단 사이 한 줄 띄움.
-- 첫 1~2문장: 호기심/공감 훅.
-- 중간: 확인 가능한 상품 특징 2~4개를 사람 말처럼 연결.
-- 필요하면 짧은 질문 1개.
-- 마지막: 댓글 키워드 '{cta_keyword}'를 정확히 한 번 사용한 자연스러운 CTA.
+[형식]
+- 500자 이하, 보통 3~6개의 짧은 문단.
+- 댓글 키워드 '{cta_keyword}'는 맨 마지막 CTA에서 정확히 한 번만 사용합니다.
+- 후보끼리 훅, 상황, 전개 방식이 확실히 달라야 합니다.
+- SEO는 사람 눈에 티 나지 않게 녹이세요. 키워드를 나열하면 실패입니다.
 
-[검색 최적화]
-- 핵심 검색어는 첫 1~2문장에 자연스럽게 한 번 사용합니다.
-- SEO 키워드를 나열하지 않습니다.
-- AI 검색에서 이해 가능한 명확한 사실문장을 포함하되 문체를 딱딱하게 만들지 않습니다.
-
-PRODUCT EVIDENCE(JSON):
-{json.dumps(evidence, ensure_ascii=False, default=str)}
+CUSTOMER EVIDENCE(JSON):
+{json.dumps(customer_evidence, ensure_ascii=False, default=str)}
 
 SEARCH CONTEXT(JSON):
 {json.dumps(search_ctx, ensure_ascii=False, default=str)}
@@ -215,36 +253,45 @@ SEARCH CONTEXT(JSON):
 PERFORMANCE FEEDBACK(JSON):
 {feedback_text}
 
-댓글 CTA 키워드: {cta_keyword}
-후보 수: {count}
+먼저 각 후보마다 내부적으로 '누가/어떤 순간에/왜 관심을 가질지'를 정한 다음 본문을 쓰세요.
+본문에는 그 내부 기획표를 노출하지 마세요.
+후보 수: {candidate_count}
 
-후보끼리 첫 문장, 전개, 표현을 서로 다르게 만드세요. 같은 문장을 단어만 바꿔 복제하지 마세요.
 JSON 배열만 반환하세요.
-각 항목: {{"body":"줄바꿈이 포함된 본문","cta_keyword":"{cta_keyword}","score":0~100,"reason":"왜 자연스럽고 근거에 맞는지 짧게"}}
+각 항목: {{"body":"줄바꿈 포함 본문","cta_keyword":"{cta_keyword}","score":0~100,"reason":"한 줄"}}
 """
+
+            content_blocks: list[dict[str, Any]] = []
+            for url in image_urls:
+                content_blocks.append({"type": "image", "source": {"type": "url", "url": url}})
+            content_blocks.append({"type": "text", "text": prompt})
+
             msg = client.messages.create(
                 model=_model_name(settings),
-                max_tokens=3200,
-                temperature=0.7,
-                messages=[{"role": "user", "content": prompt}],
+                max_tokens=4200,
+                temperature=0.82,
+                messages=[{"role": "user", "content": content_blocks}],
             )
-            raw = msg.content[0].text.strip()
+            raw = "".join(getattr(block, "text", "") for block in msg.content).strip()
             match = re.search(r"\[.*\]", raw, re.DOTALL)
             if match:
                 rows = json.loads(match.group())
-                result = []
-                for row in rows[:count]:
+                candidates: list[dict[str, Any]] = []
+                for row in rows[:candidate_count]:
                     body = _normalize_body(str(row.get("body", "")))
                     if not body:
                         continue
-                    keyword = str(row.get("cta_keyword", cta_keyword)).strip()[:100] or cta_keyword
-                    score = float(row.get("score", 75))
+                    quality_score, issues = sales_copy_score(body, evidence, cta_keyword)
+                    if quality_score < 72 or _critical_quality_issue(issues):
+                        continue
+                    model_score = max(0.0, min(float(row.get("score", 75)), 100.0))
                     search_scores = optimization_scores(body, search_ctx)
-                    result.append({
+                    final_score = round(quality_score * 0.7 + model_score * 0.3, 1)
+                    candidates.append({
                         "body": body,
-                        "cta_keyword": keyword,
-                        "score": max(0.0, min(score, 100.0)),
-                        "reason": str(row.get("reason", "AI 정밀 상품분석 기반 생성"))[:240],
+                        "cta_keyword": cta_keyword,
+                        "score": final_score,
+                        "reason": str(row.get("reason", "정밀 상품분석 기반 판매 카피"))[:240],
                         "source": "ai_profit_feedback" if performance_context else "ai",
                         "selected_angle": angle,
                         "primary_keyword": search_ctx["primary_keyword"],
@@ -253,15 +300,25 @@ JSON 배열만 반환하세요.
                         "image_url": image_url,
                         "evidence_stats": evidence.get("evidence_stats") or {},
                         "model": _model_name(settings),
+                        "quality_issues": issues,
                         **search_scores,
                     })
-                if result:
-                    return result
-        except Exception:
-            # Production keeps a deterministic fallback instead of breaking the UI.
-            pass
+                candidates.sort(key=lambda x: float(x.get("score", 0)), reverse=True)
+                if len(candidates) >= count:
+                    return candidates[:count]
+                if candidates:
+                    fallbacks = _fallback_variants(
+                        enriched_product, angle, cta_keyword, count - len(candidates),
+                        bool(performance_context), image_url=image_url, evidence=evidence,
+                    )
+                    return (candidates + fallbacks)[:count]
+        except Exception as exc:
+            logger.warning("Threads Claude content generation failed: %s", exc)
 
-    return _fallback_variants(enriched_product, angle, cta_keyword, count, bool(performance_context), image_url=image_url)
+    return _fallback_variants(
+        enriched_product, angle, cta_keyword, count, bool(performance_context),
+        image_url=image_url, evidence=evidence,
+    )
 
 
 def _fallback_variants(
@@ -272,40 +329,83 @@ def _fallback_variants(
     feedback_used: bool = False,
     *,
     image_url: str = "",
+    evidence: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    base_body, search_ctx = fallback_optimized_body(product, cta_keyword)
+    evidence = evidence or {"verified": dict(product)}
+    verified = evidence.get("verified") or product
+    public = marketing_evidence(evidence).get("public_facts") or {}
+    name = str(public.get("display_name") or natural_product_name(verified) or "이 제품")
+    category = str(public.get("category") or "제품")
+    material = str(public.get("material") or "").strip()
+    price = public.get("sell_price")
+    options = public.get("options") or []
     keyword = cta_keyword.strip() or suggest_comment_keyword(product)
-    name = str(product.get("name") or "이 상품")
-    category = str(product.get("category") or "제품")
+    search_ctx = build_search_context(product)
 
-    friendly_prefix = {
-        "problem_solution": f"{category} 찾을 때 은근 애매한 게, 내 용도에 진짜 맞는지잖아.\n\n",
-        "experience": f"{category} 같이 볼 때 나는 광고 문구보다 확인되는 정보부터 보게 되더라.\n\n",
-        "question": f"{category} 고를 때 다들 뭐부터 봐?\n\n나는 일단 옵션이랑 기본 정보부터 보는 편이야.\n\n",
-        "comparison": f"{category}, 가격만 보고 고르기엔 좀 아쉽잖아.\n\n용도랑 조건 같이 보는 게 훨씬 편해.\n\n",
-        "listicle": f"{category} 볼 때 딱 세 가지만 먼저 체크해봐.\n\n1) 사용 목적\n2) 옵션·규격\n3) 최종 판매조건\n\n",
-    }.get(angle, "")
+    facts: list[str] = []
+    if material:
+        facts.append(f"확인되는 소재는 {material}")
+    if options:
+        facts.append(f"등록된 옵션은 {len(options)}개")
+    if price not in (None, ""):
+        try:
+            facts.append(f"현재 표시 가격은 {float(price):,.0f}원")
+        except Exception:
+            pass
+    fact_line = ", ".join(facts[:2])
 
-    base_body = base_body.replace("입니다.", "이야.").replace("하세요.", "해봐.")
-    cta_line = f"\n\n더 궁금하면 댓글에 '{keyword}' 남겨줘. 보기 쉽게 같이 정리해볼게 :)"
+    adult = _is_adult_product(product)
+    if adult:
+        hooks = {
+            "problem_solution": "이런 건 남들 기준보다 내 기준에 맞는지가 더 중요하잖아.",
+            "experience": "혼자 고르는 제품일수록 괜히 더 오래 보게 되지 않아?",
+            "question": "이런 제품 고를 때 너는 디자인부터 봐, 조건부터 봐?",
+            "comparison": "비슷해 보여도 내가 중요하게 보는 포인트는 사람마다 완전 다르더라.",
+            "listicle": "이런 제품 볼 때 나는 딱 세 가지만 먼저 체크할 것 같아.",
+        }
+    else:
+        hooks = {
+            "problem_solution": f"{category} 고를 때 은근 애매한 게, 내 상황에 진짜 맞는지잖아.",
+            "experience": f"{category}는 스펙표보다 내가 실제로 중요하게 보는 조건부터 보게 되더라.",
+            "question": f"{category} 고를 때 너는 뭐부터 보는 편이야?",
+            "comparison": f"{category}, 비슷해 보여도 기준 하나 정하고 보면 훨씬 고르기 쉽더라.",
+            "listicle": f"{category} 볼 때 딱 세 가지만 먼저 체크해봐.",
+        }
 
-    result = []
+    middles: list[str] = []
+    if fact_line:
+        middles.append(f"{name}는 지금 확인되는 정보만 보면 {fact_line} 정도야.")
+    else:
+        middles.append(f"{name}는 일단 상세에서 내가 중요하게 보는 조건부터 골라 확인하는 게 좋아.")
+    middles.append("정보를 한꺼번에 다 볼 필요 없이, 내 사용 기준이랑 맞는 포인트가 있는지만 먼저 보면 돼.")
+
+    result: list[dict[str, Any]] = []
     for i in range(count):
-        intro = friendly_prefix if i == 0 else f"{name}, 보면 볼수록 체크할 포인트가 좀 있더라.\n\n"
-        body = _normalize_body(intro + base_body + cta_line)
-        search_scores = optimization_scores(body, search_ctx)
+        hook = hooks.get(angle, hooks["problem_solution"])
+        if i:
+            hook = (
+                "제품 하나 고르는데 정보가 너무 많으면 오히려 더 못 고르겠더라."
+                if i % 2 else "결국 중요한 건 남들이 좋다는 말보다 내가 보는 기준 하나인 것 같아."
+            )
+        body = _normalize_body(
+            f"{hook}\n\n{middles[0]}\n\n{middles[1]}\n\n"
+            f"더 궁금한 부분 있으면 댓글에 '{keyword}' 남겨줘. 같이 볼 포인트만 정리해줄게."
+        )
+        quality_score, issues = sales_copy_score(body, evidence, keyword)
+        scores = optimization_scores(body, search_ctx)
         result.append({
             "body": body,
             "cta_keyword": keyword,
-            "score": 70.0 if feedback_used else 67.0,
-            "reason": "친근한 여성 화자 + 순이익 전략 + 근거 기반 안전 초안" if feedback_used else "친근한 여성 화자 + 근거 기반 규칙 초안",
+            "score": min(78.0, max(55.0, quality_score - 12)),
+            "reason": "AI 실패 시에도 내부 ID·SEO 나열·근거 없는 평가를 제거한 안전 판매 초안",
             "source": "rule_profit_feedback" if feedback_used else "rule",
             "selected_angle": angle,
             "primary_keyword": search_ctx["primary_keyword"],
             "related_keywords": search_ctx["related_keywords"],
             "faq_question": search_ctx["faq_question"],
             "image_url": image_url,
-            **search_scores,
+            "quality_issues": issues,
+            **scores,
         })
     return result
 
