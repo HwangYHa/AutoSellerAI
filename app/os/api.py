@@ -1,7 +1,7 @@
 """Seller OS v3 control-plane API.
 
 The API is the stable application boundary for the current Streamlit UI and future
-frontends.  It never exposes direct ORM writes or synchronous external mutations.
+frontends. It never exposes direct ORM writes or synchronous external mutations.
 """
 from __future__ import annotations
 
@@ -139,6 +139,24 @@ def fulfillment_approve_state(approval_id: int) -> dict:
     result = approve_fulfillment_state(approval_id)
     if not result.get("ok"):
         raise HTTPException(status_code=409, detail=result.get("error", "발주 상태 처리 실패"))
+    return result
+
+
+@router.post("/fulfillments/execute/{approval_id}")
+def fulfillment_execute(approval_id: int) -> dict:
+    """Queue a supplier order on the isolated dangerous worker.
+
+    The worker independently rechecks approval, commercial facts, quantity/cost,
+    stock, idempotency and the verified SupplierOrderPort driver before any API call.
+    """
+    result = enqueue_task(
+        "supplier_order",
+        {"approval_id": int(approval_id)},
+        queue_name="dangerous",
+        dedupe_key=f"supplier_order:{int(approval_id)}",
+    )
+    if not result.get("ok"):
+        raise HTTPException(status_code=503, detail=result.get("error", "공급처 발주 작업 큐 실패"))
     return result
 
 
