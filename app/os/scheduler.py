@@ -9,7 +9,6 @@ from __future__ import annotations
 import logging
 import os
 import time
-from datetime import datetime, timezone
 
 from redis import Redis
 
@@ -19,24 +18,9 @@ from app.os.tasks import enqueue_task
 logger = logging.getLogger(__name__)
 
 SAFE_JOBS = {
-    "order_sync": {
-        "interval_env": "SELLER_ORDER_SYNC_MINUTES",
-        "default_minutes": 5,
-        "payload": {"hours": 24},
-        "queue": "sync",
-    },
-    "catalog_sync": {
-        "interval_env": "SELLER_CATALOG_SYNC_MINUTES",
-        "default_minutes": 60,
-        "payload": {},
-        "queue": "sync",
-    },
-    "data_reconcile": {
-        "interval_env": "SELLER_RECONCILE_MINUTES",
-        "default_minutes": 30,
-        "payload": {"remote": False},
-        "queue": "sync",
-    },
+    "order_sync": {"interval_env": "SELLER_ORDER_SYNC_MINUTES", "default_minutes": 5, "payload": {"hours": 24}, "queue": "sync"},
+    "catalog_sync": {"interval_env": "SELLER_CATALOG_SYNC_MINUTES", "default_minutes": 60, "payload": {}, "queue": "sync"},
+    "data_reconcile": {"interval_env": "SELLER_RECONCILE_MINUTES", "default_minutes": 30, "payload": {"remote": False}, "queue": "sync"},
 }
 
 
@@ -62,7 +46,12 @@ def _bucket(interval_minutes: int, now: float | None = None) -> int:
 
 
 def schedule_due_jobs(redis: Redis | None = None, *, now: float | None = None) -> list[dict]:
-    """Enqueue each safe job at most once per interval bucket."""
+    """Enqueue due jobs without accumulating duplicates while a previous run is pending.
+
+    Redis bucket markers enforce the requested cadence. The DB/RQ dedupe key is
+    deliberately stable per task type so a stopped worker cannot create an
+    ever-growing queue every five minutes.
+    """
     if not _enabled():
         return []
     redis = redis or _redis()
@@ -72,7 +61,6 @@ def schedule_due_jobs(redis: Redis | None = None, *, now: float | None = None) -
         interval = _minutes(spec)
         bucket = _bucket(interval, timestamp)
         marker = f"seller-os:schedule:{task_type}:{bucket}"
-        # SET NX + expiration makes scheduling idempotent across multiple processes.
         claimed = redis.set(marker, "1", nx=True, ex=max(120, interval * 60 * 2))
         if not claimed:
             continue
@@ -80,7 +68,7 @@ def schedule_due_jobs(redis: Redis | None = None, *, now: float | None = None) -
             task_type,
             dict(spec["payload"]),
             queue_name=str(spec["queue"]),
-            dedupe_key=f"scheduled:{task_type}:{bucket}",
+            dedupe_key=f"scheduled:{task_type}",
         )
         results.append({"task_type": task_type, "interval_minutes": interval, **result})
     return results
