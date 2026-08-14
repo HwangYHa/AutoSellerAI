@@ -1,7 +1,7 @@
 """공급처 통합 상품소싱 화면.
 
 도매꾹/도매매/온채널/오너클랜을 메뉴별로 돌아다니지 않고
-검색 → 비교 → 선택 → 내부 상품등록까지 한 화면에서 처리한다.
+검색 → 비교 → 선택 → Seller OS 상품등록까지 한 화면에서 처리한다.
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ if PROJECT_ROOT not in sys.path:
 
 import streamlit as st
 
-from app.pipeline import import_product
+from app.os.sourcing import import_supplier_product
 from app.suppliers.registry import list_registered, search_all
 from gui.korean_runtime import apply_korean_patch
 
@@ -121,11 +121,25 @@ if items:
             sell_price = st.number_input("초기 판매가", min_value=100, value=max(100, suggested), step=100)
             use_ai = st.checkbox("AI 상품명·상세설명 초안 생성", value=True)
             if st.button("📥 AutoSellerAI 상품으로 가져오기", type="primary", use_container_width=True):
-                with st.spinner("상품 상세·이미지를 다시 확인하고 내부 상품으로 등록 중..."):
-                    result = import_product(product.supplier_id, product.raw_id, float(sell_price), use_ai)
-                if result.get("status") in {"imported", "updated"}:
-                    st.success(f"등록 완료 · #{result.get('id')} · {result.get('name')}")
-                    st.page_link("pages/00_AutoSeller_Main.py", label="📦 상품관리로 이동", use_container_width=True)
+                with st.spinner("상품 상세·이미지를 확인하고 Seller OS 상품으로 등록 중..."):
+                    result = import_supplier_product(
+                        product.supplier_id,
+                        product.raw_id,
+                        float(sell_price),
+                        use_ai,
+                    )
+                if result.get("status") in {"imported", "updated"} and result.get("os_product_id"):
+                    st.success(
+                        f"Seller OS 상품 등록 완료 · OS #{result['os_product_id']} · {result.get('name')}"
+                    )
+                    st.caption(
+                        f"기존 호환 상품 #{result.get('id')}도 유지되며, 지금부터 Seller OS > 상품에서 바로 확인할 수 있습니다."
+                    )
+                    st.page_link(
+                        "pages/00_AutoSeller_Main.py",
+                        label="📦 Seller OS > 상품에서 확인",
+                        use_container_width=True,
+                    )
                 else:
                     st.error(result.get("error", "상품 등록 실패"))
 else:
