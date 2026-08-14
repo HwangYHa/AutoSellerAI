@@ -5,6 +5,7 @@ from typing import Any
 
 from app.db import Base, _get_engine, get_db
 import app.os.models  # noqa: F401  # register canonical tables on shared metadata
+import app.os.quality_models  # noqa: F401  # supplier commercial fact verification
 import app.os.model_events  # noqa: F401  # register persistence invariants
 from app.os.models import (
     OSApprovalRequest,
@@ -20,6 +21,7 @@ from app.os.models import (
     OSSupplier,
     OSSupplierOffer,
 )
+from app.os.quality_models import OSOfferVerification
 
 
 def ensure_os_schema() -> None:
@@ -44,6 +46,14 @@ def get_os_health() -> dict[str, Any]:
             )
             .count()
         )
+        verified_offer_ids = [x.offer_id for x in db.query(OSOfferVerification).all() if x.dropship_order_ready()]
+        if verified_offer_ids:
+            unverified_offers = db.query(OSSupplierOffer).filter(
+                OSSupplierOffer.status == "active",
+                OSSupplierOffer.id.notin_(verified_offer_ids),
+            ).count()
+        else:
+            unverified_offers = db.query(OSSupplierOffer).filter_by(status="active").count()
         return {
             "suppliers": db.query(OSSupplier).count(),
             "products": db.query(OSProduct).count(),
@@ -59,4 +69,5 @@ def get_os_health() -> dict[str, Any]:
             "failed_tasks": failed_tasks,
             "unlinked_order_items": unlinked_items,
             "unfulfilled_order_items": unfulfilled_items,
+            "unverified_supplier_offers": unverified_offers,
         }
