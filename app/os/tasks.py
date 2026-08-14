@@ -95,6 +95,18 @@ def _task_callable(task_type: str) -> Callable[[dict[str, Any]], Any]:
             return repair_all_product_images_responsive(include_marketplaces=include_marketplaces)
         return image_repair
 
+    if task_type == "listing_publish":
+        def publish_listing(payload: dict[str, Any]) -> Any:
+            approval_id = int(payload.get("approval_id") or 0)
+            if approval_id <= 0:
+                raise ValueError("listing_publish 작업에는 approval_id가 필요합니다.")
+            from app.os.operations import execute_listing_publish
+            result = execute_listing_publish(approval_id, actor="worker")
+            if not result.get("ok"):
+                raise RuntimeError(result.get("error") or "승인된 상품등록 실행 실패")
+            return result
+        return publish_listing
+
     raise ValueError(f"지원하지 않는 task_type: {task_type}")
 
 
