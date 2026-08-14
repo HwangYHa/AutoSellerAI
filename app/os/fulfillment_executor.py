@@ -1,6 +1,6 @@
 """Verified supplier-order execution service.
 
-This module is the only v3 path allowed to call a supplier order driver.  It is
+This module is the only v3 path allowed to call a supplier order driver. It is
 intended for the ``dangerous`` RQ worker after an explicit supplier.order approval.
 """
 from __future__ import annotations
@@ -13,6 +13,7 @@ from app.os.approvals import execute_idempotent, make_idempotency_key
 from app.os.drivers import get_supplier_order_driver
 from app.os.models import OSApprovalRequest, OSFulfillment, OSSalesOrder, OSSalesOrderItem, OSSupplierOffer
 from app.os.ports import SupplierOrderCommand
+from app.os.quality_models import OSOfferVerification
 from app.os.schema import ensure_os_schema
 from app.os.state import FULFILLMENT_STATES, ORDER_ITEM_STATES
 
@@ -52,6 +53,13 @@ def execute_supplier_order(approval_id: int, *, actor: str = "worker") -> dict:
         if not order or not offer:
             return {"ok": False, "error": "주문 또는 공급처 Offer가 연결되지 않았습니다."}
 
+        verification = db.query(OSOfferVerification).filter_by(offer_id=offer.id).first()
+        if not verification or not verification.dropship_order_ready():
+            return {"ok": False, "error": "공급처 상업정보 검증 상태가 유효하지 않아 실제 발주를 중단했습니다."}
+        approved_verification_id = int(payload.get("supplier_offer_verification_id") or 0)
+        if approved_verification_id and approved_verification_id != int(verification.id):
+            return {"ok": False, "error": "승인 이후 공급처 검증 레코드가 변경되었습니다. 새 승인이 필요합니다."}
+
         # Approval payload freezes the exact commercial terms the user reviewed.
         if int(payload.get("supplier_offer_id") or 0) != int(offer.id):
             return {"ok": False, "error": "승인 이후 공급처 Offer 연결이 변경되었습니다. 새 승인이 필요합니다."}
@@ -63,7 +71,11 @@ def execute_supplier_order(approval_id: int, *, actor: str = "worker") -> dict:
         current_shipping = int(offer.shipping_fee_krw or 0)
         if expected_supply != current_supply or expected_shipping != current_shipping:
             return {"ok": False, "error": "승인 이후 공급가/배송비가 변경되었습니다. 새 승인이 필요합니다."}
-        if offer.stock_qty is not None and int(offer.stock_qty) < int(item.quantity or 1):
+        if int(offer.moq or 1) > int(item.quantity or 1):
+            return {"ok": False, "error": "공급처 MOQ 조건이 주문수량과 맞지 않아 발주를 중단했습니다."}
+        if offer.stock_qty is None:
+            return {"ok": False, "error": "공급처 재고를 확인할 수 없어 발주를 중단했습니다."}
+        if int(offer.stock_qty) < int(item.quantity or 1):
             return {"ok": False, "error": "공급처 재고가 부족해 발주를 중단했습니다."}
 
         supplier_code = str(payload.get("supplier_code") or fulfillment.supplier_code or "").strip().lower()
