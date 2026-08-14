@@ -26,6 +26,35 @@ jobs:
       - name: Run full pytest suite
         run: pytest -q
 
+  migration-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DATABASE_URL: sqlite:////tmp/autoseller_migration.db
+      DB_PATH: /tmp/autoseller_migration_legacy_fallback.db
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Upgrade canonical Seller OS schema
+        run: alembic upgrade head
+      - name: Verify migration head
+        run: alembic current | grep 20260814_0001
+      - name: Verify canonical tables
+        run: |
+          python - <<'PY'
+          from sqlalchemy import create_engine, inspect
+          e = create_engine('sqlite:////tmp/autoseller_migration.db')
+          names = set(inspect(e).get_table_names())
+          required = {'os_products','os_product_variants','os_supplier_offers','os_listings','os_sales_orders','os_sales_order_items','os_fulfillments','os_settlement_lines','os_approval_requests','os_operation_executions','os_background_tasks'}
+          assert required <= names, required - names
+          print('migration tables ok:', len(names))
+          PY
+
   profit-cycle:
     runs-on: ubuntu-latest
     timeout-minutes: 10
