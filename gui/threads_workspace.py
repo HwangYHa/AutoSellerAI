@@ -15,7 +15,7 @@ from app.social.threads import growth_models as _growth_models  # noqa: F401
 from app.social.threads import models as _models  # noqa: F401
 from app.social.threads.auth import credential_status, refresh_stored_credential
 from app.social.threads.client import ThreadsClient
-from app.social.threads.content_engine import generate_threads_content
+from app.social.threads.content_engine import generate_threads_content, suggest_comment_keyword
 from app.social.threads.growth_models import OrderAttribution, ScheduledSocialPost, SocialContentDraft, TrackingClick, TrackingLink
 from app.social.threads.models import ThreadsAutomationRule, ThreadsComment, ThreadsPost, ThreadsReply
 from app.social.threads.tracking import attribution_summary, create_tracking_link
@@ -38,6 +38,18 @@ def _products() -> list[Product]:
 
 def _product_label(p: Product) -> str:
     return f"#{p.id} · {p.name[:52]} · {p.sell_price:,.0f}원"
+
+
+def _product_context(p: Product) -> dict:
+    return {
+        "id": p.id,
+        "name": p.name,
+        "category": p.category,
+        "brand": p.brand,
+        "origin": p.origin,
+        "material": p.material,
+        "sell_price": p.sell_price,
+    }
 
 
 def _send_reply(reply_id: int, text: str) -> tuple[bool, str]:
@@ -132,20 +144,34 @@ def render() -> None:
 
     with tab_content:
         st.subheader("AI 콘텐츠 자동 생성")
+        st.caption("20~30대 여성 화자가 친구에게 말하듯 자연스럽게 작성하고, 선택 상품의 특징에서 댓글 유도 키워드를 자동 추천합니다.")
         if not products:
             st.info("상품 DB에 상품을 먼저 등록하세요.")
         else:
             c1, c2 = st.columns([1, 1.5], gap="large")
             with c1:
                 pid = st.selectbox("상품", [p.id for p in products], format_func=lambda x: _product_label(product_map[x]), key="content_pid")
+                p = product_map[pid]
+                context = _product_context(p)
+                auto_cta = suggest_comment_keyword(context)
+                if st.session_state.get("content_cta_pid") != pid:
+                    st.session_state["content_cta"] = auto_cta
+                    st.session_state["content_cta_pid"] = pid
+
                 angle = st.selectbox("콘텐츠 유형", ["problem_solution", "experience", "question", "comparison", "listicle"], format_func=angle_label)
-                cta = st.text_input("댓글 유도 키워드", placeholder="청소기")
+                cta = st.text_input(
+                    "댓글 유도 키워드",
+                    key="content_cta",
+                    help="상품명·카테고리·브랜드·소재·검색 키워드에서 특징을 읽어 자동 추천합니다. 원하면 직접 수정할 수 있습니다.",
+                )
+                st.caption(f"⚡ 자동 추천: `{auto_cta}` · 상품을 바꾸면 자동으로 다시 추천됩니다.")
+                if st.button("🔄 키워드 다시 추천", use_container_width=True):
+                    st.session_state["content_cta"] = auto_cta
+                    st.rerun()
+
                 count = st.slider("후보 개수", 1, 5, 3)
                 if st.button("✨ AI 콘텐츠 생성", type="primary", use_container_width=True):
-                    p = product_map[pid]
-                    context = {"id": p.id, "name": p.name, "category": p.category, "brand": p.brand,
-                               "origin": p.origin, "material": p.material, "sell_price": p.sell_price}
-                    with st.spinner("콘텐츠 생성 중..."):
+                    with st.spinner("친근한 스레드 콘텐츠 생성 중..."):
                         variants = generate_threads_content(context, angle, cta, count)
                     with get_db() as db:
                         for v in variants:
