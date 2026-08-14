@@ -11,7 +11,7 @@ Supplier
   ↓
 Product ─ ProductVariant
   ↓
-SupplierOffer
+SupplierOffer ─ OfferVerification
   ↓
 Listing ─ ListingVariant
   ↓
@@ -35,7 +35,7 @@ BackgroundTask (dangerous queue)
   ↓
 OperationExecution (unique idempotency key)
   ↓
-Marketplace / Supplier API
+Verified Marketplace / Supplier driver
 ```
 
 ## Seller OS 화면
@@ -56,8 +56,24 @@ Marketplace / Supplier API
 - 신규 상품 실제 등록, 공급처 실제 발주, 유료 생성, 대량 변경은 승인 Gate가 필요합니다.
 - 동일 외부 작업은 `idempotency_key`로 중복 실행을 차단합니다.
 - 위험 작업은 브라우저/Streamlit 프로세스가 직접 실행하지 않고 `dangerous` RQ 큐로 넘깁니다.
+- 공급처 로그인/API 연결과 **실제 자동발주 허용**은 별개입니다. 자동발주는 검증 완료된 `SupplierOrderPort` 드라이버만 실행할 수 있습니다.
+- 공급가·배송비·재고·MOQ·옵션 ID 중 하나라도 미확인이면 `OfferVerification` Gate가 실제 발주 승인을 차단합니다. `배송비 0원`과 `배송비 미확인`, `재고 0`과 `재고 미확인`을 같은 값으로 취급하지 않습니다.
 - 재고 사입 `PurchaseOrder/MOQ`는 무재고 위탁판매 기본 업무가 아니므로 기본 비활성화합니다.
 - 금액 원장은 float가 아닌 정수 KRW 기준의 v3 `SettlementLine`을 사용합니다.
+
+## 신규 공급처 데이터 규약
+
+신규 공급처/브랜드 B2B 연동은 레거시 `NormalizedProduct`가 아니라 `SupplierCatalogItem` / `SupplierCatalogVariant`를 사용합니다.
+
+```text
+모르는 값 → None
+무료배송 → shipping_fee_krw=0 + shipping_fee_known=True
+재고 미확인 → stock_qty=None
+온라인 재판매 허용 미확인 → online_sale_allowed=None
+정품 증빙 미확인 → authenticity_evidence_available=None
+```
+
+공급처가 준 사실을 임의 기본값으로 채우지 않는 것이 원칙입니다. `app/os/catalog.py`가 이 데이터를 Product/Variant/SupplierOffer/OfferVerification으로 직접 적재합니다.
 
 ## 런타임 구조
 
@@ -101,9 +117,9 @@ DATABASE_URL=
 DB_PATH=data/autoseller.db
 ```
 
-Seller OS v3는 SQLite에서 foreign key, WAL, busy timeout을 활성화해 로컬 UI/API/worker 동시 접근 안정성을 높입니다.
+Seller OS v3는 SQLite에서 foreign key, WAL, busy timeout을 활성화해 로컬 UI/API/worker 동시 접근 안정성을 높입니다. 기존 로컬 DB는 애플리케이션이 누락된 `os_*` 테이블만 생성하고 `legacy → v3` bridge로 데이터를 보존 이관합니다.
 
-### 상용 배포
+### 신규 상용 배포
 
 `DATABASE_URL`을 지정하면 공용 SQLAlchemy 런타임을 PostgreSQL로 전환할 수 있습니다.
 
@@ -111,23 +127,31 @@ Seller OS v3는 SQLite에서 foreign key, WAL, busy timeout을 활성화해 로�
 DATABASE_URL=postgresql+psycopg://user:password@db:5432/autoseller
 ```
 
-SQLite는 단일 PC 운영용이며 다중 인스턴스 상용 배포는 PostgreSQL을 기준으로 합니다.
+신규 상용 DB의 스키마는 `create_all()`이 아니라 Alembic migration을 기준으로 관리합니다.
+
+```bash
+alembic upgrade head
+```
+
+SQLite는 단일 PC 운영용이며 다중 인스턴스 상용 배포는 PostgreSQL을 기준으로 합니다. 이미 Seller OS v3 테이블이 애플리케이션에 의해 생성된 기존 로컬 SQLite DB에는 초기 migration을 그대로 다시 실행하지 않습니다.
 
 ## 기존 데이터 이관
 
 기존 운영 DB를 즉시 파괴하지 않습니다. `app/os/bridge.py`의 idempotent bridge가 기존 데이터를 새 `os_*` 데이터 척추로 한 방향 이관합니다.
 
 ```text
-legacy Product             → os_products
-legacy options             → os_product_variants (transition default variant)
-SupplierRawProduct         → os_supplier_offers
-Listing + MarketplaceIdentity → os_listings / os_listing_variants
-PlatformOrder              → os_sales_orders / os_sales_order_items
-supplier order/tracking    → os_fulfillments
-Order                      → os_settlement_lines
+legacy Product                 → os_products
+legacy options                 → os_product_variants (transition default variant)
+SupplierRawProduct             → os_supplier_offers
+Listing + MarketplaceIdentity  → os_listings / os_listing_variants
+PlatformOrder                  → os_sales_orders / os_sales_order_items
+supplier order/tracking        → os_fulfillments
+Order                          → os_settlement_lines
 ```
 
-새 기능은 `app/os` Application Layer를 기준으로 구현하고, 기존 `app/pipeline.py`와 `gui/legacy_app.py`는 호환/이관 계층으로 축소한 뒤 호출이 0이 되면 제거하는 방향입니다.
+Bridge가 만든 기존 공급처 Offer는 자동으로 신뢰하지 않습니다. `os_offer_verifications`가 없는 기존 Offer는 실제 자동발주 대상에서 차단되고, 공급처를 v3 catalog contract로 다시 동기화하거나 명시적으로 검증해야 합니다.
+
+새 기능은 `app/os` Application Layer를 기준으로 구현하고, 기존 `app/pipeline.py`와 `gui/legacy_app.py`는 호환/이관 계층으로 축소한 뒤 호출이 0이 되면 제거합니다.
 
 ## 공급처 및 판매채널
 
@@ -137,7 +161,7 @@ Order                      → os_settlement_lines
 - 공급처: OwnerClan, Domeggook, Domemai, OnChannel
 - AI: Claude, OpenAI
 
-새 공급처는 UI마다 별도 로직을 만들지 않고 `SupplierOrderPort` / 공급처 Connector 규약으로 확장합니다. 특히 실제 자동발주는 공급처별 payload, 주문 시뮬레이션, 취소, 송장 조회가 검증된 드라이버만 활성화합니다.
+새 공급처는 UI마다 별도 로직을 만들지 않고 strict catalog contract와 `SupplierOrderPort` 규약으로 확장합니다. 실제 자동발주는 공급처별 payload mapping, 주문 simulation, 취소, 송장 조회를 검증한 드라이버만 `verified=True`로 등록합니다.
 
 ## 실행
 
@@ -175,6 +199,7 @@ pytest -q
 GitHub Actions는 다음을 검증합니다.
 
 - 전체 pytest
+- Seller OS Alembic migration smoke test
 - 수익 피드백 closed-loop test
 - Docker Compose build/start
 - Streamlit health
@@ -188,42 +213,48 @@ GitHub Actions는 다음을 검증합니다.
 
 ```text
 app/
-  os/                   # Seller OS v3 canonical application layer
-    models.py            # v3 relational spine
-    state.py             # explicit state machines
-    approvals.py         # approval + idempotency
-    operations.py        # high-risk commands
-    dashboard.py         # work queue/read model
-    queries.py           # detail/profit read models
-    tasks.py             # persistent Redis/RQ tasks
-    ports.py             # marketplace/supplier contracts
-    bridge.py            # legacy -> v3 migration bridge
-    api.py               # FastAPI control plane
-    database.py          # SQLite/PostgreSQL runtime bootstrap
-  suppliers/             # supplier infrastructure adapters
-  platforms/             # marketplace infrastructure clients
-  media/                 # product image/detail-page infrastructure
-  social/                # Threads
+  os/                         # Seller OS v3 canonical application layer
+    models.py                  # v3 relational spine
+    quality_models.py          # supplier commercial-fact verification
+    catalog_contracts.py       # strict supplier data contract
+    catalog.py                 # direct v3 supplier ingestion
+    state.py                   # explicit state machines
+    approvals.py               # approval + idempotency
+    operations.py              # high-risk approval commands
+    fulfillment_executor.py    # verified supplier-order execution
+    drivers.py                 # verified driver registry
+    dashboard.py               # work queue/read model
+    queries.py                 # detail/profit read models
+    tasks.py                   # persistent Redis/RQ tasks
+    ports.py                   # marketplace/supplier contracts
+    bridge.py                  # legacy -> v3 migration bridge
+    api.py                     # FastAPI control plane
+    database.py                # SQLite/PostgreSQL runtime bootstrap
+  suppliers/                   # supplier infrastructure adapters
+  platforms/                   # marketplace infrastructure clients
+  media/                       # product image/detail-page infrastructure
+  social/                      # Threads
 
 gui/
-  app.py                 # default Seller OS entry
-  seller_os_v3.py        # unified operating workspace
-  pages/                 # auxiliary/migration pages
+  app.py                       # default Seller OS entry
+  seller_os_v3.py              # unified operating workspace
+  pages/                       # auxiliary/migration pages
 
-docs/
-  SELLER_OS_V3_ARCHITECTURE.md
+migrations/                    # production canonical DB migrations
+docs/SELLER_OS_V3_ARCHITECTURE.md
 ```
 
 ## 아직 전환 중인 영역
 
-Seller OS v3의 데이터 척추, 승인 Gate, idempotency journal, 작업큐, 통합 UI와 Control Plane은 도입되어 있습니다. 다만 다음 항목은 공급처/판매채널별 검증이 끝날 때까지 레거시 infrastructure를 bridge로 사용합니다.
+Seller OS v3의 데이터 척추, 공급정보 검증 Gate, 승인 Gate, idempotency journal, 작업큐, 통합 UI, Control Plane과 DB migration 경계는 도입되어 있습니다. 다만 다음 항목은 공급처/판매채널별 검증이 끝날 때까지 레거시 infrastructure를 bridge로 사용합니다.
 
 - 기존 쿠팡/스마트스토어 실제 업로드 구현
 - 기존 마켓 주문수집 구현
 - 공급처별 실제 주문 payload mapper
 - 공급처별 주문취소/송장조회 자동화
+- 기존 공급처의 structured ProductVariant 직접 수집
 - 레거시 수익/정산 데이터의 v3 원장 전환
 
-**실제 공급처 발주는 검증된 v3 주문 드라이버가 준비되기 전에는 승인 상태까지만 진행하고 외부 주문을 자동 실행하지 않습니다.** 안전성보다 자동화 속도를 우선하지 않습니다.
+**실제 공급처 발주는 검증된 v3 주문 드라이버가 준비되기 전에는 외부 주문을 자동 실행하지 않습니다.** 승인만 받았다고 공급처 API가 호출되지는 않으며, dangerous worker가 승인 내용·공급가·배송비·재고·MOQ·옵션·idempotency·driver verification을 다시 검사합니다.
 
 자세한 설계와 제거 기준은 `docs/SELLER_OS_V3_ARCHITECTURE.md`를 참고하세요.
