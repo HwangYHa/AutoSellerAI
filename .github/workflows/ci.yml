@@ -77,8 +77,10 @@ jobs:
           exit 1
       - name: Verify Redis
         run: docker compose exec -T redis redis-cli ping | grep PONG
-      - name: Verify Seller worker
-        run: docker compose ps seller-worker | grep autoseller-worker
+      - name: Verify Seller workers
+        run: |
+          docker compose ps seller-worker | grep autoseller-worker
+          docker compose ps seller-dangerous-worker | grep autoseller-dangerous-worker
       - name: Show service status
         run: docker compose ps
       - name: Logs on failure
