@@ -5,6 +5,7 @@ from typing import Any
 
 from app.db import Base, _get_engine, get_db
 import app.os.models  # noqa: F401  # register canonical tables on shared metadata
+import app.os.model_events  # noqa: F401  # register persistence invariants
 from app.os.models import (
     OSApprovalRequest,
     OSBackgroundTask,
