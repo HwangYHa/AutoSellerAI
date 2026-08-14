@@ -9,6 +9,7 @@ import httpx
 import streamlit as st
 from sqlalchemy import desc, func, select
 
+from app.config import get_settings
 from app.db import Product, get_db, init_db
 from app.social.threads import auth_models as _auth_models  # noqa: F401
 from app.social.threads import growth_models as _growth_models  # noqa: F401
@@ -40,15 +41,50 @@ def _product_label(p: Product) -> str:
     return f"#{p.id} · {p.name[:52]} · {p.sell_price:,.0f}원"
 
 
+def _json_list(value) -> list:
+    if isinstance(value, list):
+        return value
+    try:
+        parsed = json.loads(str(value or "[]"))
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return []
+
+
+def _first_product_image(p: Product | None) -> str:
+    if not p:
+        return ""
+    for value in [*_json_list(p.images), *_json_list(p.detail_images)]:
+        if isinstance(value, str) and value.startswith(("http://", "https://")):
+            return value
+        if isinstance(value, dict):
+            for key in ("url", "src", "image_url", "imageUrl"):
+                url = str(value.get(key) or "")
+                if url.startswith(("http://", "https://")):
+                    return url
+    return ""
+
+
 def _product_context(p: Product) -> dict:
+    """Pass the complete stored product evidence to the content engine."""
     return {
         "id": p.id,
+        "sku": p.sku,
+        "source": p.source,
+        "source_id": p.source_id,
+        "source_url": p.source_url,
         "name": p.name,
         "category": p.category,
         "brand": p.brand,
         "origin": p.origin,
         "material": p.material,
+        "supply_price": p.supply_price,
         "sell_price": p.sell_price,
+        "images": _json_list(p.images),
+        "detail_images": _json_list(p.detail_images),
+        "options": _json_list(p.options),
+        "detail_html": p.detail_html,
+        "status": p.status,
     }
 
 
@@ -144,7 +180,18 @@ def render() -> None:
 
     with tab_content:
         st.subheader("AI 콘텐츠 자동 생성")
-        st.caption("20~30대 여성 화자가 친구에게 말하듯 자연스럽게 작성하고, 선택 상품의 특징에서 댓글 유도 키워드를 자동 추천합니다.")
+        settings = get_settings()
+        content_model = str(os.getenv("THREADS_CONTENT_MODEL", "") or settings.claude_model_heavy or settings.claude_model)
+        ai_connected = bool(settings.claude_api_key)
+        st.caption(
+            "상품 DB의 원본 URL·옵션·가격·브랜드·소재·상세 HTML·이미지 정보를 근거로 정밀 분석한 뒤, "
+            "20~30대 여성 화자가 실제 친구에게 말하듯 콘텐츠를 만듭니다."
+        )
+        m1, m2, m3 = st.columns(3)
+        m1.metric("AI API", "Claude 연결됨" if ai_connected else "규칙 기반 fallback")
+        m2.metric("콘텐츠 모델", content_model)
+        m3.metric("원본 페이지 보강", "사용" if str(os.getenv("THREADS_PRODUCT_PAGE_FETCH", "true")).lower() in {"1", "true", "yes", "on"} else "사용 안 함")
+
         if not products:
             st.info("상품 DB에 상품을 먼저 등록하세요.")
         else:
@@ -154,31 +201,59 @@ def render() -> None:
                 p = product_map[pid]
                 context = _product_context(p)
                 auto_cta = suggest_comment_keyword(context)
-                if st.session_state.get("content_cta_pid") != pid:
-                    st.session_state["content_cta"] = auto_cta
-                    st.session_state["content_cta_pid"] = pid
 
-                angle = st.selectbox("콘텐츠 유형", ["problem_solution", "experience", "question", "comparison", "listicle"], format_func=angle_label)
+                st.caption(
+                    f"분석 근거 · 옵션 {len(context['options'])}개 · 대표이미지 {len(context['images'])}개 · "
+                    f"상세이미지 {len(context['detail_images'])}개 · 상세HTML {'있음' if context['detail_html'] else '없음'}"
+                )
+                if p.source_url and str(p.source_url).startswith(("http://", "https://")):
+                    st.link_button("🔎 원본 상품 페이지 확인", p.source_url, use_container_width=True)
+
+                angle = st.selectbox(
+                    "콘텐츠 유형",
+                    ["problem_solution", "experience", "question", "comparison", "listicle"],
+                    format_func=angle_label,
+                )
+
+                # Use one widget key per product. This eliminates the Streamlit error
+                # caused by mutating a widget-bound session_state key after creation.
+                cta_key = f"content_cta_{pid}"
+                if cta_key not in st.session_state:
+                    st.session_state[cta_key] = auto_cta
+                if st.button("🔄 키워드 다시 추천", key=f"content_cta_reset_{pid}", use_container_width=True):
+                    st.session_state[cta_key] = auto_cta
                 cta = st.text_input(
                     "댓글 유도 키워드",
-                    key="content_cta",
-                    help="상품명·카테고리·브랜드·소재·검색 키워드에서 특징을 읽어 자동 추천합니다. 원하면 직접 수정할 수 있습니다.",
+                    key=cta_key,
+                    help="상품명·카테고리·브랜드·소재·옵션에서 확인되는 특징으로 자동 추천합니다. 직접 수정할 수도 있습니다.",
                 )
-                st.caption(f"⚡ 자동 추천: `{auto_cta}` · 상품을 바꾸면 자동으로 다시 추천됩니다.")
-                if st.button("🔄 키워드 다시 추천", use_container_width=True):
-                    st.session_state["content_cta"] = auto_cta
-                    st.rerun()
+                st.caption(f"⚡ 현재 자동 추천: `{auto_cta}`")
 
+                show_images = st.checkbox("최근 콘텐츠 후보에 상품 이미지 함께 보기", value=True, key="content_show_images")
                 count = st.slider("후보 개수", 1, 5, 3)
                 if st.button("✨ AI 콘텐츠 생성", type="primary", use_container_width=True):
-                    with st.spinner("친근한 스레드 콘텐츠 생성 중..."):
+                    if not ai_connected:
+                        st.warning("CLAUDE_API_KEY가 없어 규칙 기반 초안으로 생성됩니다.")
+                    with st.spinner("상품 근거를 정밀 분석하고 자연스러운 스레드 콘텐츠를 생성 중..."):
                         variants = generate_threads_content(context, angle, cta, count)
                     with get_db() as db:
                         for v in variants:
-                            db.add(SocialContentDraft(product_id=pid, angle=angle, body=v["body"], cta_keyword=v["cta_keyword"], ai_source=v["source"], score=float(v["score"])))
+                            db.add(SocialContentDraft(
+                                product_id=pid,
+                                angle=angle,
+                                body=v["body"],
+                                cta_keyword=v["cta_keyword"],
+                                ai_source=v["source"],
+                                score=float(v["score"]),
+                            ))
                         db.commit()
-                    st.success(f"{len(variants)}개 후보를 저장했습니다.")
+                    if variants:
+                        model_used = variants[0].get("model")
+                        st.success(f"{len(variants)}개 후보를 저장했습니다." + (f" · {model_used}" if model_used else ""))
+                    else:
+                        st.error("콘텐츠 후보를 만들지 못했습니다.")
                     st.rerun()
+
             with c2:
                 st.markdown("#### 최근 콘텐츠 후보")
                 with get_db() as db:
@@ -186,7 +261,19 @@ def render() -> None:
                 for d in drafts:
                     with st.container(border=True):
                         st.caption(f"#{d.id} · {angle_label(d.angle)} · 점수 {d.score:.0f} · {ai_source_label(d.ai_source)}")
-                        st.write(d.body)
+                        draft_product = product_map.get(d.product_id)
+                        image_url = _first_product_image(draft_product) if show_images else ""
+                        if image_url:
+                            img_col, text_col = st.columns([1, 2.4], vertical_alignment="top")
+                            with img_col:
+                                try:
+                                    st.image(image_url, use_container_width=True)
+                                except Exception:
+                                    st.caption("이미지 미리보기 불가")
+                            with text_col:
+                                st.write(d.body)
+                        else:
+                            st.write(d.body)
 
         st.divider()
         st.subheader("추적 링크 + 게시 예약")
