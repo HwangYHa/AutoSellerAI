@@ -48,6 +48,7 @@ def get_work_queue(limit: int = 100) -> list[dict[str, Any]]:
         result.append({
             "priority": 10 if approval["risk_level"] == "critical" else 20,
             "kind": "approval",
+            "action_type": approval["action_type"],
             "id": approval["id"],
             "title": approval["summary"] or approval["action_type"],
             "detail": f"{approval['entity_type']} #{approval['entity_id']}",
@@ -67,6 +68,7 @@ def get_work_queue(limit: int = 100) -> list[dict[str, Any]]:
             result.append({
                 "priority": 5,
                 "kind": "order_exception",
+                "action_type": "order.exception",
                 "id": item.id,
                 "title": item.product_name or "주문 상품 연결 필요",
                 "detail": item.exception_code or "주문 예외",
@@ -85,6 +87,7 @@ def get_work_queue(limit: int = 100) -> list[dict[str, Any]]:
             result.append({
                 "priority": 3,
                 "kind": "fulfillment_failed",
+                "action_type": "supplier.order.failed",
                 "id": f.id,
                 "title": f"공급처 발주 실패 · {f.supplier_code or '공급처 미확인'}",
                 "detail": f.failure_message or f.failure_code or "발주 실패",
@@ -103,6 +106,7 @@ def get_work_queue(limit: int = 100) -> list[dict[str, Any]]:
             result.append({
                 "priority": 30,
                 "kind": "task_failed",
+                "action_type": "automation.failed",
                 "id": task.id,
                 "title": f"자동화 작업 실패 · {task.task_type}",
                 "detail": task.error[:240],
