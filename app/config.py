@@ -21,8 +21,11 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 1440
     algorithm: str = "HS256"
 
-    # SQLite DB 경로 (현재 Seller OS 주 데이터베이스)
+    # 데이터 / 작업 큐
+    # local: DATABASE_URL 비우고 SQLite 사용. production: PostgreSQL DATABASE_URL 권장.
+    database_url: str = ""
     db_path: str = "data/autoseller.db"
+    redis_url: str = "redis://localhost:6379/0"
 
     # 공통 판매자 fallback — 플랫폼 API/상품 데이터가 없을 때만 사용
     seller_support_phone: str = ""
@@ -36,7 +39,6 @@ class Settings(BaseSettings):
     naver_client_secret: str = ""
     naver_login_id: str = ""
     naver_login_pw: str = ""
-    # 아래 3개는 fallback. 상품/판매자 API에서 얻은 값이 우선한다.
     naver_after_service_phone: str = ""
     naver_origin_area_content: str = ""
     naver_delivery_company_code: str = ""
@@ -46,7 +48,6 @@ class Settings(BaseSettings):
     coupang_secret_key: str = ""
     coupang_vendor_id: str = ""
     coupang_vendor_user_id: str = ""
-    # 출고지/반품지는 API 자동조회 우선, 아래 값은 fallback
     coupang_outbound_shipping_place_code: int = 0
     coupang_return_center_code: str = ""
     coupang_return_zip_code: str = ""
@@ -67,7 +68,7 @@ class Settings(BaseSettings):
     # 오너클랜 판매사 API (JWT + GraphQL)
     ownerclan_username: str = ""
     ownerclan_password: str = ""
-    ownerclan_environment: str = "production"  # production | sandbox
+    ownerclan_environment: str = "production"
 
     # 네이버 쇼핑 검색 + 데이터랩
     naver_search_client_id: str = ""
@@ -90,8 +91,6 @@ class Settings(BaseSettings):
     image_ai_detail_count: int = 3
     image_source_page_fetch: bool = True
     image_output_dir: str = "data/generated"
-    # CDN/정적호스팅에 IMAGE_OUTPUT_DIR 파일을 같은 이름으로 노출할 때 사용.
-    # 비어 있으면 AI 이미지는 로컬 미리보기용으로만 사용한다.
     image_public_base_url: str = ""
 
     # 텔레그램 알림
