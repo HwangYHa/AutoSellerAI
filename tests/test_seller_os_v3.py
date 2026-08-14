@@ -8,7 +8,9 @@ from sqlalchemy import inspect
 from app.db import _get_engine, get_db
 from app.os.approvals import make_idempotency_key, payload_hash
 from app.os.bridge import migrate_legacy_to_os
+from app.os.catalog_contracts import SupplierCatalogItem, SupplierCatalogVariant
 from app.os.models import OSListing, OSProduct
+from app.os.quality_models import OSOfferVerification
 from app.os.schema import ensure_os_schema, get_os_health
 from app.os.state import FULFILLMENT_STATES, LISTING_STATES, PRODUCT_STATES
 
@@ -21,6 +23,7 @@ def test_os_schema_contains_canonical_spine_and_safety_tables():
         "os_products",
         "os_product_variants",
         "os_supplier_offers",
+        "os_offer_verifications",
         "os_listings",
         "os_listing_variants",
         "os_sales_orders",
@@ -59,6 +62,44 @@ def test_idempotency_key_is_stable_and_payload_sensitive():
     assert make_idempotency_key("supplier.order", "item", "1", a) != make_idempotency_key(
         "supplier.order", "item", "1", c
     )
+
+
+def test_strict_supplier_contract_never_treats_unknown_as_free_or_unlimited():
+    item = SupplierCatalogItem(
+        supplier_code="sample",
+        supplier_product_id="P1",
+        name="검증 대기 상품",
+        shipping_fee_krw=None,
+        moq=None,
+        variants=(
+            SupplierCatalogVariant(
+                supplier_variant_id="V1",
+                option_key="size=270",
+                supply_price_krw=50000,
+                stock_qty=None,
+            ),
+        ),
+    )
+    errors = set(item.data_quality_errors())
+    assert "SHIPPING_FEE_UNKNOWN" in errors
+    assert "MOQ_UNKNOWN" in errors
+    assert "STOCK_UNKNOWN:size=270" in errors
+    assert "ONLINE_SALE_PERMISSION_UNKNOWN" in item.compliance_unknowns()
+    assert "AUTHENTICITY_EVIDENCE_UNKNOWN" in item.compliance_unknowns()
+
+
+def test_offer_verification_requires_all_order_critical_facts():
+    row = OSOfferVerification(
+        offer_id=1,
+        price_known=True,
+        shipping_fee_known=True,
+        stock_known=True,
+        moq_known=True,
+        variant_identity_verified=False,
+    )
+    assert row.dropship_order_ready() is False
+    row.variant_identity_verified = True
+    assert row.dropship_order_ready() is True
 
 
 def test_pending_listing_external_ids_are_unique_before_marketplace_publish():
