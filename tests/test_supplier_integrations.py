@@ -81,11 +81,16 @@ def test_domeggook_adapter_available_with_api_key(monkeypatch):
     assert DomeggookAdapter().is_available() is True
 
 
-def test_supplier_menu_pages_exist():
+def test_supplier_diagnostic_pages_exist_but_normal_navigation_is_unified():
+    """Legacy diagnostic pages may exist during migration but must not fragment normal navigation."""
     from pathlib import Path
+
     root = Path(__file__).resolve().parents[1]
     assert (root / "gui/pages/21_도매꾹_연동.py").exists()
     assert (root / "gui/pages/22_온채널_연동.py").exists()
+
     app_text = (root / "gui/app.py").read_text(encoding="utf-8")
-    assert "도매꾹 연동" in app_text
-    assert "온채널 연동" in app_text
+    assert "Seller OS" in app_text
+    assert "통합 상품 소싱" in app_text
+    assert 'page_link("pages/21_도매꾹_연동.py"' not in app_text
+    assert 'page_link("pages/22_온채널_연동.py"' not in app_text
