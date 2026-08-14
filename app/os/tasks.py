@@ -107,6 +107,18 @@ def _task_callable(task_type: str) -> Callable[[dict[str, Any]], Any]:
             return result
         return publish_listing
 
+    if task_type == "supplier_order":
+        def create_supplier_order(payload: dict[str, Any]) -> Any:
+            approval_id = int(payload.get("approval_id") or 0)
+            if approval_id <= 0:
+                raise ValueError("supplier_order 작업에는 approval_id가 필요합니다.")
+            from app.os.fulfillment_executor import execute_supplier_order
+            result = execute_supplier_order(approval_id, actor="worker")
+            if not result.get("ok"):
+                raise RuntimeError(result.get("error") or "승인된 공급처 발주 실행 실패")
+            return result
+        return create_supplier_order
+
     raise ValueError(f"지원하지 않는 task_type: {task_type}")
 
 
