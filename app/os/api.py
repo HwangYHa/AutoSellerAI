@@ -16,6 +16,7 @@ from app.os.approvals import decide_approval, get_pending_approvals
 from app.os.bridge import migrate_legacy_to_os
 from app.os.dashboard import get_dashboard, list_orders, list_products
 from app.os.operations import approve_fulfillment_state, request_listing_publish, request_order_fulfillment
+from app.os.runtime_health import get_runtime_health
 from app.os.schema import ensure_os_schema, get_os_health
 from app.os.tasks import enqueue_task, get_task, list_tasks
 
@@ -73,7 +74,14 @@ def _startup() -> None:
 
 @app.get("/health")
 def health() -> dict:
-    return {"ok": True, "os": get_os_health()}
+    runtime = get_runtime_health()
+    return {
+        "ok": runtime["ok"],
+        "ready": runtime["ready"],
+        "status": runtime["status"],
+        "os": get_os_health(),
+        "runtime": runtime,
+    }
 
 
 @router.get("/dashboard")
