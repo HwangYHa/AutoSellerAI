@@ -10,8 +10,6 @@ import json
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import or_
-
 from app.db import get_db
 from app.os.approvals import execute_idempotent, request_approval
 from app.os.bridge import migrate_legacy_to_os
@@ -24,6 +22,7 @@ from app.os.models import (
     OSSupplier,
     OSSupplierOffer,
 )
+from app.os.quality_models import OSOfferVerification
 from app.os.schema import ensure_os_schema
 from app.os.state import FULFILLMENT_STATES, LISTING_STATES, ORDER_ITEM_STATES
 
@@ -103,11 +102,7 @@ def request_listing_publish(product_id: int, platform: str, *, actor: str = "use
 
 
 def execute_listing_publish(approval_id: int, *, actor: str = "worker") -> dict[str, Any]:
-    """Execute one approved marketplace publication.
-
-    This function is intended for the dangerous RQ worker. The HTTP/UI layer only
-    queues it after approval.
-    """
+    """Execute one approved marketplace publication in the dangerous worker."""
     ensure_os_schema()
     with get_db() as db:
         approval = db.query(OSApprovalRequest).filter_by(id=int(approval_id)).first()
@@ -185,8 +180,8 @@ def _select_supplier_offer(db, item: OSSalesOrderItem) -> tuple[OSSupplierOffer 
             return exact[0], ""
         if len(exact) > 1:
             return None, "SUPPLIER_SELECTION_REQUIRED"
-        # Legacy bridge may expose one product-level/default offer until the supplier
-        # connector is upgraded to structured variants. Only accept it if unique.
+        # Legacy bridge may temporarily expose one product-level offer. It still
+        # cannot pass a real order until an explicit verification record exists.
         fallback = base.filter(OSSupplierOffer.variant_id.is_(None)).all()
         if len(fallback) == 1:
             return fallback[0], ""
@@ -202,15 +197,21 @@ def _select_supplier_offer(db, item: OSSalesOrderItem) -> tuple[OSSupplierOffer 
     return None, "SUPPLIER_SELECTION_REQUIRED"
 
 
-def _validate_offer_for_order(item: OSSalesOrderItem, offer: OSSupplierOffer) -> str:
+def _validate_offer_for_order(db, item: OSSalesOrderItem, offer: OSSupplierOffer) -> tuple[str, OSOfferVerification | None]:
+    verification = db.query(OSOfferVerification).filter_by(offer_id=offer.id).first()
+    if not verification or not verification.dropship_order_ready():
+        return "SUPPLIER_FACTS_UNVERIFIED", verification
+
     quantity = max(1, int(item.quantity or 1))
     if int(offer.supply_price_krw or 0) <= 0:
-        return "SUPPLY_PRICE_UNKNOWN"
+        return "SUPPLY_PRICE_UNKNOWN", verification
     if int(offer.moq or 1) > quantity:
-        return "MOQ_NOT_SUPPORTED"
-    if offer.stock_qty is not None and int(offer.stock_qty) < quantity:
-        return "SUPPLIER_STOCK_SHORTAGE"
-    return ""
+        return "MOQ_NOT_SUPPORTED", verification
+    if offer.stock_qty is None:
+        return "SUPPLIER_STOCK_UNKNOWN", verification
+    if int(offer.stock_qty) < quantity:
+        return "SUPPLIER_STOCK_SHORTAGE", verification
+    return "", verification
 
 
 def _set_item_exception(item: OSSalesOrderItem, code: str) -> None:
@@ -248,16 +249,18 @@ def request_order_fulfillment(order_item_id: int, *, actor: str = "user") -> dic
             return {"ok": False, "error": messages.get(selection_error, "사용 가능한 공급처 상품이 없습니다.")}
 
         item.supplier_offer_id = offer.id
-        validation_error = _validate_offer_for_order(item, offer)
+        validation_error, verification = _validate_offer_for_order(db, item, offer)
         if validation_error:
             _set_item_exception(item, validation_error)
             db.commit()
             messages = {
+                "SUPPLIER_FACTS_UNVERIFIED": "공급가·배송비·재고·MOQ·옵션 식별정보가 모두 검증되지 않아 실제 발주 승인을 차단했습니다.",
                 "SUPPLY_PRICE_UNKNOWN": "공급가가 확인되지 않아 실제 발주를 승인할 수 없습니다.",
                 "MOQ_NOT_SUPPORTED": "공급처 최소주문수량(MOQ)이 고객 주문수량보다 큽니다.",
+                "SUPPLIER_STOCK_UNKNOWN": "공급처 재고가 확인되지 않아 실제 발주를 승인할 수 없습니다.",
                 "SUPPLIER_STOCK_SHORTAGE": "공급처 재고가 고객 주문수량보다 부족합니다.",
             }
-            return {"ok": False, "error": messages[validation_error]}
+            return {"ok": False, "error": messages[validation_error], "code": validation_error}
 
         if item.status in {"new", "exception"}:
             if ORDER_ITEM_STATES.can(item.status, "ready"):
@@ -290,12 +293,13 @@ def request_order_fulfillment(order_item_id: int, *, actor: str = "user") -> dic
 
         quantity = max(1, int(item.quantity or 1))
         fulfillment_id = int(fulfillment.id)
-        supplier_name = supplier.name if supplier else (supplier.code if supplier else "공급처")
+        supplier_name = supplier.name if supplier else "공급처"
         product_name = item.product_name
         payload = {
             "order_item_id": int(order_item_id),
             "fulfillment_id": fulfillment_id,
             "supplier_offer_id": int(offer.id),
+            "supplier_offer_verification_id": int(verification.id) if verification else None,
             "supplier_code": supplier.code if supplier else "",
             "supplier_product_id": str(offer.supplier_product_id or ""),
             "supplier_variant_id": str(offer.supplier_variant_id or ""),
@@ -304,6 +308,7 @@ def request_order_fulfillment(order_item_id: int, *, actor: str = "user") -> dic
             "expected_supply_cost_krw": int(offer.supply_price_krw or 0) * quantity,
             "expected_shipping_cost_krw": int(offer.shipping_fee_krw or 0),
             "offer_last_synced_at": offer.last_synced_at.isoformat() if offer.last_synced_at else None,
+            "commercial_facts_verified_at": verification.verified_at.isoformat() if verification and verification.verified_at else None,
         }
         db.commit()
 
@@ -343,10 +348,12 @@ def approve_fulfillment_state(approval_id: int) -> dict[str, Any]:
         if item and item.status == "ready":
             ORDER_ITEM_STATES.require(item.status, "approved")
             item.status = "approved"
+        fulfillment_id = int(fulfillment.id)
+        status = str(fulfillment.status)
         db.commit()
         return {
             "ok": True,
-            "fulfillment_id": fulfillment.id,
-            "status": fulfillment.status,
+            "fulfillment_id": fulfillment_id,
+            "status": status,
             "message": "승인 완료. 검증된 공급처 주문 드라이버가 있는 경우에만 자동 실행 대상이 됩니다.",
         }
