@@ -86,6 +86,24 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  seller-scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: autoseller-scheduler
+    command: ["python", "-m", "app.os.scheduler"]
+    volumes:
+      - ./data:/app/data
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
   social-api:
     build:
       context: .
