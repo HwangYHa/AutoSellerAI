@@ -1,7 +1,8 @@
 """Strict supplier catalog contracts for Seller OS v3.
 
-Unknown commercial facts are represented as ``None``. V3 must never invent origin,
-shipping fee, stock or lead time just to make a product look complete.
+Unknown commercial/compliance facts are represented as ``None``. V3 must never
+invent origin, shipping fee, stock, lead time or brand-sale permission just to make
+a product look complete.
 """
 from __future__ import annotations
 
@@ -39,6 +40,11 @@ class SupplierCatalogItem:
     shipping_fee_krw: int | None = None
     moq: int | None = None
     lead_time_days: int | None = None
+    # None = 아직 확인하지 못함. False/True는 공급계약/증빙으로 확인된 값만 사용.
+    online_sale_allowed: bool | None = None
+    authenticity_evidence_available: bool | None = None
+    verification_source: str = ""
+    verification_note: str = ""
     variants: tuple[SupplierCatalogVariant, ...] = ()
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -71,4 +77,12 @@ class SupplierCatalogItem:
             errors.append("SHIPPING_FEE_UNKNOWN")
         if self.moq is None:
             errors.append("MOQ_UNKNOWN")
+        return errors
+
+    def compliance_unknowns(self) -> list[str]:
+        errors: list[str] = []
+        if self.online_sale_allowed is None:
+            errors.append("ONLINE_SALE_PERMISSION_UNKNOWN")
+        if self.authenticity_evidence_available is None:
+            errors.append("AUTHENTICITY_EVIDENCE_UNKNOWN")
         return errors
