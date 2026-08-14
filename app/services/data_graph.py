@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import DateTime, Integer, String, Index
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import (
@@ -55,31 +56,100 @@ def ensure_data_graph_schema() -> None:
 
 def _upsert_identity(db, *, product_id: int, listing_id: int | None,
                      platform: str, identity_type: str, identity_value: Any) -> bool:
+    """원자적으로 marketplace identity를 생성/갱신한다.
+
+    order_sync와 data_reconcile처럼 여러 worker가 같은 identity를 동시에 발견해도
+    SELECT -> INSERT race로 UNIQUE constraint 오류가 발생하지 않아야 한다.
+    SQLite/PostgreSQL은 DB native UPSERT를 사용하고, 기타 DB는 SAVEPOINT 기반
+    fallback으로 기존 행을 재사용한다.
+    """
     value = str(identity_value or "").strip()
     if not value:
         return False
+
+    values = {
+        "product_id": int(product_id),
+        "listing_id": int(listing_id) if listing_id else None,
+        "platform": str(platform),
+        "identity_type": str(identity_type),
+        "identity_value": value,
+        "updated_at": datetime.utcnow(),
+    }
+    dialect = (db.get_bind().dialect.name or "").lower()
+
+    # Native UPSERT is one DB statement, so concurrent workers cannot both win an INSERT.
+    if dialect == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert as dialect_insert
+
+        stmt = dialect_insert(MarketplaceIdentity).values(**values)
+        update_values: dict[str, Any] = {
+            "product_id": stmt.excluded.product_id,
+            "updated_at": stmt.excluded.updated_at,
+        }
+        if listing_id:
+            update_values["listing_id"] = stmt.excluded.listing_id
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["platform", "identity_type", "identity_value"],
+            set_=update_values,
+        )
+        db.execute(stmt)
+        return True
+
+    if dialect == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert as dialect_insert
+
+        stmt = dialect_insert(MarketplaceIdentity).values(**values)
+        update_values = {
+            "product_id": stmt.excluded.product_id,
+            "updated_at": stmt.excluded.updated_at,
+        }
+        if listing_id:
+            update_values["listing_id"] = stmt.excluded.listing_id
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["platform", "identity_type", "identity_value"],
+            set_=update_values,
+        )
+        db.execute(stmt)
+        return True
+
+    # Conservative fallback for an unsupported SQL dialect.  A nested transaction
+    # keeps a duplicate-key race from poisoning the caller's whole reconciliation.
     row = db.query(MarketplaceIdentity).filter_by(
         platform=platform,
         identity_type=identity_type,
         identity_value=value,
     ).first()
     if row:
-        changed = False
-        if row.product_id != product_id:
-            row.product_id = product_id
-            changed = True
-        if listing_id and row.listing_id != listing_id:
+        changed = row.product_id != product_id or bool(listing_id and row.listing_id != listing_id)
+        row.product_id = product_id
+        if listing_id:
             row.listing_id = listing_id
-            changed = True
         return changed
-    db.add(MarketplaceIdentity(
-        product_id=product_id,
-        listing_id=listing_id,
-        platform=platform,
-        identity_type=identity_type,
-        identity_value=value,
-    ))
-    return True
+
+    try:
+        with db.begin_nested():
+            db.add(MarketplaceIdentity(
+                product_id=product_id,
+                listing_id=listing_id,
+                platform=platform,
+                identity_type=identity_type,
+                identity_value=value,
+            ))
+            db.flush()
+        return True
+    except IntegrityError:
+        # Another transaction inserted the same identity between our SELECT/INSERT.
+        row = db.query(MarketplaceIdentity).filter_by(
+            platform=platform,
+            identity_type=identity_type,
+            identity_value=value,
+        ).first()
+        if not row:
+            raise
+        row.product_id = product_id
+        if listing_id:
+            row.listing_id = listing_id
+        return True
 
 
 def _seed_listing_identities(db) -> int:
