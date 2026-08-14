@@ -26,6 +26,24 @@ _BAD_SALES_PATTERNS = (
     r"Q\.\s*.*?A\.",
 )
 
+_SPEC_GAP_PATTERNS = (
+    r"상세\s*스펙(?:\s*정보)?(?:가|이)?\s*(?:많지\s*않|부족|적|없)",
+    r"스펙(?:이|가)?\s*(?:부족|적|없)",
+    r"상세\s*정보(?:가|이)?\s*(?:많지\s*않|부족|적|없)",
+    r"확인되는\s*정보만\s*보면",
+    r"정보가\s*부족(?:해서|하니|하다)",
+)
+
+_FAKE_EXPERIENCE_PATTERNS = (
+    r"내돈내산",
+    r"내가\s*(?:직접\s*)?(?:샀|구매했|주문했)",
+    r"직접\s*(?:사서|구매해서|주문해서|써봤|사용해봤)",
+    r"(?:써|사용해)\s*보니",
+    r"(?:며칠|일주일|한달|한\s*달)\s*(?:써|사용해)",
+    r"배송\s*받(?:고|아|아서)",
+    r"재구매",
+)
+
 _INTERNAL_TOKEN_RE = re.compile(r"\b(?:[A-Za-z]{2,}\d{3,}|\d{4,}[A-Za-z]{2,})\b")
 
 
@@ -54,18 +72,21 @@ def natural_product_name(verified: dict[str, Any]) -> str:
     first_generic = next((i for i, p in enumerate(parts) if p in _ADULT_GENERIC_TERMS), None)
     if first_generic is not None and first_generic >= 1:
         shortened = parts[:first_generic]
-        # Keep at least brand/model-like information; never collapse to nothing.
         if shortened:
             return " ".join(shortened[:5])
 
-    # Remove an obvious trailing internal code even when the DB source_id is missing.
     if len(parts) > 1 and _INTERNAL_TOKEN_RE.fullmatch(parts[-1]):
         parts = parts[:-1]
     return " ".join(parts[:12]) or raw
 
 
 def marketing_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
-    """Separate customer-facing evidence from internal operational metadata."""
+    """Separate customer-facing evidence from internal operational metadata.
+
+    Social copy should not volunteer origin/internal catalog facts unless another
+    workflow explicitly requires them. They stay available in the source DB but are
+    intentionally excluded from the creative prompt.
+    """
     verified = dict(evidence.get("verified") or {})
     category = str(verified.get("category") or "").strip()
     public_category = "" if category.isdigit() else category
@@ -80,10 +101,7 @@ def marketing_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
         "options": verified.get("options") or [],
         "stored_detail_text": verified.get("stored_detail_text") or "",
     }
-    # Origin is a verified fact but usually a weak social-sales hook. Keep it as
-    # low-priority evidence so the model may use it only when genuinely relevant.
     low_priority = {
-        "origin": verified.get("origin") or "",
         "source_url": verified.get("source_url") or "",
     }
     internal = {
@@ -91,6 +109,7 @@ def marketing_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
         "source": verified.get("source") or "",
         "source_id": verified.get("source_id") or "",
         "raw_category": category,
+        "origin": verified.get("origin") or "",
         "supply_price": verified.get("supply_price"),
         "status": verified.get("status") or "",
     }
@@ -122,6 +141,10 @@ def copy_quality_issues(body: str, evidence: dict[str, Any], cta_keyword: str = 
     if category.isdigit() and re.search(rf"(?<!\d){re.escape(category)}(?!\d)", text):
         issues.append("numeric_category")
 
+    origin = str(verified.get("origin") or "").strip()
+    if origin and re.search(rf"(?<![0-9A-Za-z가-힣]){re.escape(origin)}(?:산|\s*제품)?(?![0-9A-Za-z가-힣])", text):
+        issues.append("origin_overexposure")
+
     if _INTERNAL_TOKEN_RE.search(text):
         known_internal = {
             str(verified.get("sku") or "").lower(),
@@ -136,7 +159,16 @@ def copy_quality_issues(body: str, evidence: dict[str, Any], cta_keyword: str = 
             issues.append("unsupported_or_template_judgment")
             break
 
-    # Keyword-stuffed supplier titles should never be repeated as prose.
+    for pattern in _SPEC_GAP_PATTERNS:
+        if re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL):
+            issues.append("spec_gap_disclaimer")
+            break
+
+    for pattern in _FAKE_EXPERIENCE_PATTERNS:
+        if re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL):
+            issues.append("fabricated_personal_experience")
+            break
+
     adult_term_hits = sum(1 for term in _ADULT_GENERIC_TERMS if term in text)
     if adult_term_hits >= 4:
         issues.append("keyword_stuffing")
@@ -165,6 +197,9 @@ def sales_copy_score(body: str, evidence: dict[str, Any], cta_keyword: str = "")
         "numeric_category": 35,
         "keyword_stuffing": 35,
         "unsupported_or_template_judgment": 30,
+        "origin_overexposure": 30,
+        "spec_gap_disclaimer": 35,
+        "fabricated_personal_experience": 45,
         "formal_ad_tone": 15,
         "missing_cta": 15,
         "duplicate_cta": 12,
@@ -173,7 +208,6 @@ def sales_copy_score(body: str, evidence: dict[str, Any], cta_keyword: str = "")
     for issue in issues:
         score -= weights.get(issue, 10)
 
-    # Reward readable Threads spacing rather than one giant paragraph.
     paragraphs = [x.strip() for x in re.split(r"\n\s*\n", str(body or "")) if x.strip()]
     if 3 <= len(paragraphs) <= 6:
         score += 5
