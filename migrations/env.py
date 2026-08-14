@@ -8,6 +8,7 @@ from sqlalchemy import engine_from_config, pool
 from app.config import get_settings
 from app.db import Base
 import app.os.models  # noqa: F401  # register Seller OS tables
+import app.os.quality_models  # noqa: F401  # register supplier offer verification table
 
 config = context.config
 if config.config_file_name is not None:
