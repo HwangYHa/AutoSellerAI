@@ -31,7 +31,7 @@ services:
     container_name: autoseller-api
     command: ["uvicorn", "app.os.api:app", "--host", "0.0.0.0", "--port", "8001"]
     ports:
-      - "8001:8001"
+      - "127.0.0.1:8001:8001"
     volumes:
       - ./data:/app/data
     env_file:
@@ -55,7 +55,25 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: autoseller-worker
-    command: ["rq", "worker", "sync", "automation", "dangerous", "--url", "redis://redis:6379/0"]
+    command: ["rq", "worker", "sync", "automation", "--url", "redis://redis:6379/0"]
+    volumes:
+      - ./data:/app/data
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  seller-dangerous-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: autoseller-dangerous-worker
+    command: ["rq", "worker", "dangerous", "--url", "redis://redis:6379/0"]
     volumes:
       - ./data:/app/data
     env_file:
