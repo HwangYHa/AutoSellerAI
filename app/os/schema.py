@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.db import _get_engine, get_db
-from app.os import models  # noqa: F401  # register tables on shared metadata
+from app.db import Base, _get_engine, get_db
+import app.os.models  # noqa: F401  # register canonical tables on shared metadata
 from app.os.models import (
     OSApprovalRequest,
     OSBackgroundTask,
@@ -22,13 +22,9 @@ from app.os.models import (
 
 
 def ensure_os_schema() -> None:
-    """Create only the canonical OS tables if missing.
-
-    Local SQLite uses create_all for zero-friction upgrades. Production deployments
-    should still run an explicit migration step before application startup.
-    """
-    table_names = [table for name, table in models.Base.metadata.tables.items() if name.startswith("os_")]
-    models.Base.metadata.create_all(_get_engine(), tables=table_names)
+    """Create only canonical OS tables that are currently missing."""
+    tables = [table for name, table in Base.metadata.tables.items() if name.startswith("os_")]
+    Base.metadata.create_all(_get_engine(), tables=tables)
 
 
 def get_os_health() -> dict[str, Any]:
