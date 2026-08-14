@@ -44,6 +44,7 @@ def _task_callable(task_type: str) -> Callable[[dict[str, Any]], Any]:
     if task_type == "legacy_bridge":
         from app.os.bridge import migrate_legacy_to_os
         return lambda payload: migrate_legacy_to_os()
+
     if task_type == "catalog_sync":
         def sync_catalogs(payload: dict[str, Any]) -> Any:
             from app.sync.catalog_sync import sync_coupang_catalog, sync_smartstore_catalog
@@ -57,11 +58,12 @@ def _task_callable(task_type: str) -> Callable[[dict[str, Any]], Any]:
             result["bridge"] = migrate_legacy_to_os()
             return result
         return sync_catalogs
+
     if task_type == "order_sync":
         def sync_orders(payload: dict[str, Any]) -> Any:
             from app.pipeline import collect_platform_orders
             hours = max(1, int(payload.get("hours", 24)))
-            result = collect_platform_orders(hours=hours)
+            result = collect_platform_orders(hours_back=hours)
             from app.services.data_graph import reconcile_data_graph
             from app.os.bridge import migrate_legacy_to_os
             return {
@@ -70,6 +72,7 @@ def _task_callable(task_type: str) -> Callable[[dict[str, Any]], Any]:
                 "bridge": migrate_legacy_to_os(),
             }
         return sync_orders
+
     if task_type == "data_reconcile":
         def reconcile(payload: dict[str, Any]) -> Any:
             from app.services.data_graph import reconcile_data_graph
@@ -79,11 +82,19 @@ def _task_callable(task_type: str) -> Callable[[dict[str, Any]], Any]:
                 "bridge": migrate_legacy_to_os(),
             }
         return reconcile
+
     if task_type == "image_repair":
         def image_repair(payload: dict[str, Any]) -> Any:
-            from app.services.image_maintenance import repair_all_product_images
-            return repair_all_product_images(limit=max(1, int(payload.get("limit", 500))))
+            from app.services.image_maintenance import (
+                refresh_supplier_images_responsive,
+                repair_all_product_images_responsive,
+            )
+            include_marketplaces = bool(payload.get("include_marketplaces", True))
+            if "limit" in payload and not include_marketplaces:
+                return refresh_supplier_images_responsive(limit=max(1, int(payload.get("limit", 300))))
+            return repair_all_product_images_responsive(include_marketplaces=include_marketplaces)
         return image_repair
+
     raise ValueError(f"지원하지 않는 task_type: {task_type}")
 
 
