@@ -39,6 +39,32 @@ def test_quality_gate_rejects_ids_keyword_stuffing_and_unsupported_sales_judgmen
     assert any(x.startswith("internal_") for x in issues)
 
 
+def test_quality_gate_rejects_origin_spec_gap_and_fake_personal_review_claims():
+    evidence = _adult_evidence()
+    body = (
+        "원산지는 중국 제품이고 상세 스펙 정보가 많지 않아서 조금 아쉽긴 해. "
+        "그래도 내돈내산으로 직접 써봤는데 괜찮더라. 댓글에 '선택팁' 남겨줘."
+    )
+    score, issues = sales_copy_score(body, evidence, "선택팁")
+    assert score < 40
+    assert "origin_overexposure" in issues
+    assert "spec_gap_disclaimer" in issues
+    assert "fabricated_personal_experience" in issues
+
+
+def test_review_like_observation_is_allowed_when_it_does_not_claim_purchase_or_use():
+    evidence = _adult_evidence()
+    body = (
+        "솔직히 이런 건 딱 봤을 때 취향 맞으면 괜히 한 번 더 보게 되지 않아?\n\n"
+        "프리티러브 프리다, 남들 기준보다 내가 보자마자 어떤 느낌이 드는지가 은근 중요한 것 같아.\n\n"
+        "궁금한 포인트 있으면 댓글에 '선택팁' 남겨줘."
+    )
+    issues = copy_quality_issues(body, evidence, "선택팁")
+    assert "fabricated_personal_experience" not in issues
+    assert "origin_overexposure" not in issues
+    assert "spec_gap_disclaimer" not in issues
+
+
 def test_adult_product_auto_cta_is_curiosity_hook_not_raw_seo_phrase():
     product = {
         "name": "프리티러브 프리다 성인용품 여성용품 여성자위기구 딜도 진동기 바이브레이터",
@@ -68,4 +94,7 @@ def test_fallback_never_exposes_internal_catalog_fields_or_full_seo_title():
         assert "63815" not in body
         assert "yhw084jq" not in body
         assert "여성자위기구 딜도 진동기 바이브레이터 자위기구" not in body
+        assert "중국" not in body
+        assert "스펙 정보가 많지" not in body
+        assert "내돈내산" not in body
         assert not copy_quality_issues(body, evidence, "선택팁")
