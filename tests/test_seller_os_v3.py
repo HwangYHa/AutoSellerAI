@@ -160,3 +160,16 @@ def test_normal_seller_os_ui_does_not_own_threads_orm_or_external_mutations():
     assert "오늘 할 일" in workspace
     assert "주문 · 배송" in workspace
     assert "설정 · 자동화" in workspace
+
+
+def test_sourcing_import_is_immediately_routed_into_seller_os():
+    root = Path(__file__).resolve().parents[1]
+    page = (root / "gui/pages/30_상품소싱.py").read_text(encoding="utf-8")
+    service = (root / "app/os/sourcing.py").read_text(encoding="utf-8")
+
+    assert "from app.pipeline import import_product" not in page
+    assert "from app.os.sourcing import import_supplier_product" in page
+    assert "import_supplier_product(" in page
+    assert "Seller OS > 상품에서 확인" in page
+    assert "migrate_legacy_to_os()" in service
+    assert "OSProduct" in service
