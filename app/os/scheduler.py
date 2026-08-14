@@ -13,6 +13,7 @@ import time
 from redis import Redis
 
 from app.config import get_settings
+from app.os.task_recovery import recover_stale_safe_tasks
 from app.os.tasks import enqueue_task
 
 logger = logging.getLogger(__name__)
@@ -77,9 +78,22 @@ def schedule_due_jobs(redis: Redis | None = None, *, now: float | None = None) -
 def run_forever() -> None:
     logging.basicConfig(level=getattr(logging, str(get_settings().log_level).upper(), logging.INFO))
     logger.info("Seller OS safe scheduler started")
+    next_recovery_at = 0.0
     while True:
         try:
-            results = schedule_due_jobs()
+            redis = _redis()
+            now_mono = time.monotonic()
+            if now_mono >= next_recovery_at:
+                recovery = recover_stale_safe_tasks(redis)
+                if recovery.get("recovered"):
+                    logger.warning(
+                        "recovered orphaned safe tasks count=%s ids=%s",
+                        recovery.get("recovered"),
+                        recovery.get("task_ids"),
+                    )
+                next_recovery_at = now_mono + 60.0
+
+            results = schedule_due_jobs(redis)
             for row in results:
                 logger.info("scheduled %s task_id=%s ok=%s", row["task_type"], row.get("task_id"), row.get("ok"))
         except Exception:
