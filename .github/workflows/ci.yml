@@ -43,14 +43,14 @@ jobs:
       - name: Upgrade canonical Seller OS schema
         run: alembic upgrade head
       - name: Verify migration head
-        run: alembic current | grep 20260814_0001
+        run: alembic current | grep 20260814_0002
       - name: Verify canonical tables
         run: |
           python - <<'PY'
           from sqlalchemy import create_engine, inspect
           e = create_engine('sqlite:////tmp/autoseller_migration.db')
           names = set(inspect(e).get_table_names())
-          required = {'os_products','os_product_variants','os_supplier_offers','os_listings','os_sales_orders','os_sales_order_items','os_fulfillments','os_settlement_lines','os_approval_requests','os_operation_executions','os_background_tasks'}
+          required = {'os_products','os_product_variants','os_supplier_offers','os_offer_verifications','os_listings','os_sales_orders','os_sales_order_items','os_fulfillments','os_settlement_lines','os_approval_requests','os_operation_executions','os_background_tasks'}
           assert required <= names, required - names
           print('migration tables ok:', len(names))
           PY
