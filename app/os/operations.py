@@ -1,13 +1,16 @@
 """High-risk Seller OS commands.
 
-No UI should call marketplace/supplier mutation APIs directly.  UI creates an
-approval, then this module consumes it through the idempotent operation journal.
+No UI calls marketplace/supplier mutation APIs directly. The application creates an
+approval package first; approved external mutations are executed by the dangerous
+RQ worker through the idempotency journal.
 """
 from __future__ import annotations
 
 import json
 from datetime import datetime
 from typing import Any
+
+from sqlalchemy import or_
 
 from app.db import get_db
 from app.os.approvals import execute_idempotent, request_approval
@@ -38,17 +41,23 @@ def request_listing_publish(product_id: int, platform: str, *, actor: str = "use
     platform = platform.strip().lower()
     if platform not in {"coupang", "smartstore"}:
         return {"ok": False, "error": "지원하지 않는 판매채널입니다."}
+
     with get_db() as db:
         product = db.query(OSProduct).filter_by(id=int(product_id)).first()
         if not product:
             return {"ok": False, "error": "상품을 찾을 수 없습니다."}
         if product.status not in {"ready", "active"}:
             return {"ok": False, "error": f"판매 준비가 끝난 상품만 등록할 수 있습니다. 현재 상태: {product.status}"}
+
         content = _content(product)
         legacy_product_id = content.get("legacy_product_id")
         if not legacy_product_id:
             return {"ok": False, "error": "아직 판매채널 업로더와 연결되지 않은 v3 상품입니다."}
-        listing = db.query(OSListing).filter_by(product_id=product.id, platform=platform, account_key="default").first()
+
+        product_name = product.name
+        listing = db.query(OSListing).filter_by(
+            product_id=product.id, platform=platform, account_key="default"
+        ).first()
         if not listing:
             listing = OSListing(
                 product_id=product.id,
@@ -60,6 +69,7 @@ def request_listing_publish(product_id: int, platform: str, *, actor: str = "use
             )
             db.add(listing)
             db.flush()
+
         if listing.status == "active":
             return {"ok": True, "already_active": True, "listing_id": listing.id}
         if listing.status not in {"draft", "failed", "pending_approval"}:
@@ -69,21 +79,22 @@ def request_listing_publish(product_id: int, platform: str, *, actor: str = "use
                 listing.status = "draft"
             LISTING_STATES.require(listing.status, "pending_approval")
             listing.status = "pending_approval"
-        listing_id = listing.id
+
+        listing_id = int(listing.id)
+        payload = {
+            "product_id": int(product_id),
+            "listing_id": listing_id,
+            "legacy_product_id": int(legacy_product_id),
+            "platform": platform,
+        }
         db.commit()
 
-    payload = {
-        "product_id": int(product_id),
-        "listing_id": listing_id,
-        "legacy_product_id": int(legacy_product_id),
-        "platform": platform,
-    }
     approval = request_approval(
         action_type="marketplace.publish",
         entity_type="listing",
         entity_id=listing_id,
         payload=payload,
-        summary=f"{platform.upper()}에 '{product.name}' 실제 상품 등록",
+        summary=f"{platform.upper()}에 '{product_name}' 실제 상품 등록",
         risk_level="high",
         requested_by=actor,
         ttl_minutes=60,
@@ -91,7 +102,12 @@ def request_listing_publish(product_id: int, platform: str, *, actor: str = "use
     return {"ok": True, "listing_id": listing_id, **approval}
 
 
-def execute_listing_publish(approval_id: int, *, actor: str = "user") -> dict[str, Any]:
+def execute_listing_publish(approval_id: int, *, actor: str = "worker") -> dict[str, Any]:
+    """Execute one approved marketplace publication.
+
+    This function is intended for the dangerous RQ worker. The HTTP/UI layer only
+    queues it after approval.
+    """
     ensure_os_schema()
     with get_db() as db:
         approval = db.query(OSApprovalRequest).filter_by(id=int(approval_id)).first()
@@ -114,6 +130,8 @@ def execute_listing_publish(approval_id: int, *, actor: str = "user") -> dict[st
             db.commit()
 
     def executor() -> Any:
+        # Transitional infrastructure adapter. This call is isolated inside the
+        # dangerous worker until marketplace clients implement MarketplaceMutationPort.
         from app.pipeline import upload_product
         result = upload_product(int(payload["legacy_product_id"]), [str(payload["platform"])])
         first = result[0] if result else {"status": "failed", "error": "응답 없음"}
@@ -132,13 +150,16 @@ def execute_listing_publish(approval_id: int, *, actor: str = "user") -> dict[st
         require_approval=True,
         actor=actor,
     )
+
     with get_db() as db:
         listing = db.query(OSListing).filter_by(id=int(payload["listing_id"])).first()
         if listing:
             if result.get("ok"):
-                listing.status = "active"
                 response = result.get("response") or {}
-                listing.external_product_id = str(response.get("platform_id") or listing.external_product_id or "")
+                listing.status = "active"
+                external = response.get("platform_id")
+                if external:
+                    listing.external_product_id = str(external)
                 listing.error = ""
                 listing.last_synced_at = datetime.utcnow()
             else:
@@ -148,33 +169,102 @@ def execute_listing_publish(approval_id: int, *, actor: str = "user") -> dict[st
     return result
 
 
+def _select_supplier_offer(db, item: OSSalesOrderItem) -> tuple[OSSupplierOffer | None, str]:
+    """Select an offer without silently mixing variants."""
+    if item.supplier_offer_id:
+        existing = db.query(OSSupplierOffer).filter_by(id=item.supplier_offer_id, status="active").first()
+        if existing:
+            if item.variant_id and existing.variant_id not in {None, item.variant_id}:
+                return None, "SUPPLIER_VARIANT_MISMATCH"
+            return existing, ""
+
+    base = db.query(OSSupplierOffer).filter_by(product_id=item.product_id, status="active")
+    if item.variant_id:
+        exact = base.filter(OSSupplierOffer.variant_id == item.variant_id).all()
+        if len(exact) == 1:
+            return exact[0], ""
+        if len(exact) > 1:
+            return None, "SUPPLIER_SELECTION_REQUIRED"
+        # Legacy bridge may expose one product-level/default offer until the supplier
+        # connector is upgraded to structured variants. Only accept it if unique.
+        fallback = base.filter(OSSupplierOffer.variant_id.is_(None)).all()
+        if len(fallback) == 1:
+            return fallback[0], ""
+        if len(fallback) > 1:
+            return None, "SUPPLIER_SELECTION_REQUIRED"
+        return None, "NO_VARIANT_OFFER"
+
+    offers = base.all()
+    if len(offers) == 1:
+        return offers[0], ""
+    if not offers:
+        return None, "NO_SUPPLIER_OFFER"
+    return None, "SUPPLIER_SELECTION_REQUIRED"
+
+
+def _validate_offer_for_order(item: OSSalesOrderItem, offer: OSSupplierOffer) -> str:
+    quantity = max(1, int(item.quantity or 1))
+    if int(offer.supply_price_krw or 0) <= 0:
+        return "SUPPLY_PRICE_UNKNOWN"
+    if int(offer.moq or 1) > quantity:
+        return "MOQ_NOT_SUPPORTED"
+    if offer.stock_qty is not None and int(offer.stock_qty) < quantity:
+        return "SUPPLIER_STOCK_SHORTAGE"
+    return ""
+
+
+def _set_item_exception(item: OSSalesOrderItem, code: str) -> None:
+    if item.status != "exception":
+        if ORDER_ITEM_STATES.can(item.status, "exception"):
+            item.status = "exception"
+        else:
+            item.status = "exception"
+    item.exception_code = code
+
+
 def request_order_fulfillment(order_item_id: int, *, actor: str = "user") -> dict[str, Any]:
-    """Create the supplier-order approval package, without sending an order."""
+    """Create an exact supplier-order approval package without sending an order."""
     ensure_os_schema()
     with get_db() as db:
         item = db.query(OSSalesOrderItem).filter_by(id=int(order_item_id)).first()
         if not item:
             return {"ok": False, "error": "주문 품목을 찾을 수 없습니다."}
         if not item.product_id:
+            _set_item_exception(item, "UNLINKED_PRODUCT")
+            db.commit()
             return {"ok": False, "error": "내부 상품과 연결되지 않은 주문입니다."}
-        offer = None
-        if item.supplier_offer_id:
-            offer = db.query(OSSupplierOffer).filter_by(id=item.supplier_offer_id).first()
+        if item.status in {"ordered", "shipped", "completed", "cancelled"}:
+            return {"ok": False, "error": f"현재 주문품목 상태에서는 새 발주 요청을 만들 수 없습니다: {item.status}"}
+
+        offer, selection_error = _select_supplier_offer(db, item)
         if not offer:
-            offers = db.query(OSSupplierOffer).filter_by(product_id=item.product_id, status="active").all()
-            if len(offers) == 1:
-                offer = offers[0]
-                item.supplier_offer_id = offer.id
-            elif not offers:
-                item.status = "exception"
-                item.exception_code = "NO_SUPPLIER_OFFER"
-                db.commit()
-                return {"ok": False, "error": "사용 가능한 공급처 상품이 없습니다."}
-            else:
-                item.status = "exception"
-                item.exception_code = "SUPPLIER_SELECTION_REQUIRED"
-                db.commit()
-                return {"ok": False, "error": "공급처 후보가 여러 개입니다. 공급처를 먼저 선택하세요."}
+            _set_item_exception(item, selection_error or "NO_SUPPLIER_OFFER")
+            db.commit()
+            messages = {
+                "SUPPLIER_SELECTION_REQUIRED": "공급처 후보가 여러 개입니다. 공급처를 먼저 선택하세요.",
+                "SUPPLIER_VARIANT_MISMATCH": "주문 옵션과 선택된 공급처 옵션이 일치하지 않습니다.",
+                "NO_VARIANT_OFFER": "주문 옵션에 맞는 공급처 상품 옵션이 없습니다.",
+            }
+            return {"ok": False, "error": messages.get(selection_error, "사용 가능한 공급처 상품이 없습니다.")}
+
+        item.supplier_offer_id = offer.id
+        validation_error = _validate_offer_for_order(item, offer)
+        if validation_error:
+            _set_item_exception(item, validation_error)
+            db.commit()
+            messages = {
+                "SUPPLY_PRICE_UNKNOWN": "공급가가 확인되지 않아 실제 발주를 승인할 수 없습니다.",
+                "MOQ_NOT_SUPPORTED": "공급처 최소주문수량(MOQ)이 고객 주문수량보다 큽니다.",
+                "SUPPLIER_STOCK_SHORTAGE": "공급처 재고가 고객 주문수량보다 부족합니다.",
+            }
+            return {"ok": False, "error": messages[validation_error]}
+
+        if item.status in {"new", "exception"}:
+            if ORDER_ITEM_STATES.can(item.status, "ready"):
+                ORDER_ITEM_STATES.require(item.status, "ready")
+            item.status = "ready"
+            item.exception_code = ""
+
         supplier = db.query(OSSupplier).filter_by(id=offer.supplier_id).first()
         fulfillment = db.query(OSFulfillment).filter_by(order_item_id=item.id).first()
         if fulfillment and fulfillment.status in {"ordered", "shipping", "shipped", "completed"}:
@@ -185,8 +275,8 @@ def request_order_fulfillment(order_item_id: int, *, actor: str = "user") -> dic
                 supplier_offer_id=offer.id,
                 supplier_code=supplier.code if supplier else "",
                 status="pending_approval",
-                quantity=item.quantity,
-                supply_cost_krw=int(offer.supply_price_krw or 0) * int(item.quantity or 1),
+                quantity=max(1, int(item.quantity or 1)),
+                supply_cost_krw=int(offer.supply_price_krw or 0) * max(1, int(item.quantity or 1)),
                 shipping_cost_krw=int(offer.shipping_fee_krw or 0),
             )
             db.add(fulfillment)
@@ -194,30 +284,37 @@ def request_order_fulfillment(order_item_id: int, *, actor: str = "user") -> dic
         elif fulfillment.status == "failed":
             FULFILLMENT_STATES.require("failed", "pending_approval")
             fulfillment.status = "pending_approval"
-        if item.status == "ready":
-            ORDER_ITEM_STATES.require(item.status, "approved")
-        fulfillment_id = fulfillment.id
+            fulfillment.failure_code = ""
+            fulfillment.failure_message = ""
+            fulfillment.supplier_offer_id = offer.id
+
+        quantity = max(1, int(item.quantity or 1))
+        fulfillment_id = int(fulfillment.id)
+        supplier_name = supplier.name if supplier else (supplier.code if supplier else "공급처")
+        product_name = item.product_name
+        payload = {
+            "order_item_id": int(order_item_id),
+            "fulfillment_id": fulfillment_id,
+            "supplier_offer_id": int(offer.id),
+            "supplier_code": supplier.code if supplier else "",
+            "supplier_product_id": str(offer.supplier_product_id or ""),
+            "supplier_variant_id": str(offer.supplier_variant_id or ""),
+            "variant_id": int(item.variant_id) if item.variant_id else None,
+            "quantity": quantity,
+            "expected_supply_cost_krw": int(offer.supply_price_krw or 0) * quantity,
+            "expected_shipping_cost_krw": int(offer.shipping_fee_krw or 0),
+            "offer_last_synced_at": offer.last_synced_at.isoformat() if offer.last_synced_at else None,
+        }
         db.commit()
 
-    payload = {
-        "order_item_id": int(order_item_id),
-        "fulfillment_id": fulfillment_id,
-        "supplier_offer_id": offer.id,
-        "supplier_code": supplier.code if supplier else "",
-        "supplier_product_id": offer.supplier_product_id,
-        "supplier_variant_id": offer.supplier_variant_id,
-        "quantity": int(item.quantity or 1),
-        "expected_supply_cost_krw": int(offer.supply_price_krw or 0) * int(item.quantity or 1),
-        "expected_shipping_cost_krw": int(offer.shipping_fee_krw or 0),
-    }
     approval = request_approval(
         action_type="supplier.order",
         entity_type="fulfillment",
         entity_id=fulfillment_id,
         payload=payload,
         summary=(
-            f"{supplier.name if supplier else payload['supplier_code']}에 '{item.product_name}' "
-            f"{item.quantity}개 실제 발주 · 예상 {payload['expected_supply_cost_krw'] + payload['expected_shipping_cost_krw']:,}원"
+            f"{supplier_name}에 '{product_name}' {quantity}개 실제 발주 · "
+            f"예상 {payload['expected_supply_cost_krw'] + payload['expected_shipping_cost_krw']:,}원"
         ),
         risk_level="critical",
         requested_by=actor,
@@ -227,12 +324,7 @@ def request_order_fulfillment(order_item_id: int, *, actor: str = "user") -> dic
 
 
 def approve_fulfillment_state(approval_id: int) -> dict[str, Any]:
-    """Move an approved supplier order to executable state.
-
-    Actual supplier API execution is intentionally adapter-specific.  A supplier is
-    eligible for automatic execution only after its v3 order driver has a verified
-    payload mapper, simulation and cancellation behavior.
-    """
+    """Move an approved supplier order to executable state, without external API call."""
     ensure_os_schema()
     with get_db() as db:
         approval = db.query(OSApprovalRequest).filter_by(id=int(approval_id)).first()
