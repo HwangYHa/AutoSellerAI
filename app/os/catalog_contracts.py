@@ -1,6 +1,6 @@
 """Strict supplier catalog contracts for Seller OS v3.
 
-Unknown commercial facts are represented as ``None``.  V3 must never invent origin,
+Unknown commercial facts are represented as ``None``. V3 must never invent origin,
 shipping fee, stock or lead time just to make a product look complete.
 """
 from __future__ import annotations
@@ -34,11 +34,25 @@ class SupplierCatalogItem:
     images: tuple[str, ...] = ()
     detail_images: tuple[str, ...] = ()
     detail_html: str = ""
+    supply_price_krw: int | None = None
+    stock_qty: int | None = None
     shipping_fee_krw: int | None = None
     moq: int | None = None
     lead_time_days: int | None = None
     variants: tuple[SupplierCatalogVariant, ...] = ()
     raw: dict[str, Any] = field(default_factory=dict)
+
+    def effective_variants(self) -> tuple[SupplierCatalogVariant, ...]:
+        if self.variants:
+            return self.variants
+        return (
+            SupplierCatalogVariant(
+                supplier_variant_id="__default__",
+                option_key="__default__",
+                supply_price_krw=self.supply_price_krw,
+                stock_qty=self.stock_qty,
+            ),
+        )
 
     def data_quality_errors(self) -> list[str]:
         errors: list[str] = []
@@ -48,13 +62,7 @@ class SupplierCatalogItem:
             errors.append("SUPPLIER_PRODUCT_ID_REQUIRED")
         if not self.name.strip():
             errors.append("PRODUCT_NAME_REQUIRED")
-        variants = self.variants or (
-            SupplierCatalogVariant(
-                supplier_variant_id="__default__",
-                option_key="__default__",
-            ),
-        )
-        for variant in variants:
+        for variant in self.effective_variants():
             if variant.supply_price_krw is None or int(variant.supply_price_krw) <= 0:
                 errors.append(f"SUPPLY_PRICE_UNKNOWN:{variant.option_key}")
             if variant.stock_qty is None:
