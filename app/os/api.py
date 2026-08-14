@@ -1,27 +1,46 @@
 """Seller OS v3 control-plane API.
 
-This is the stable application boundary for the current Streamlit UI and a future
-React/Next.js frontend.  Business mutations must flow through application services,
-not direct ORM writes from the UI.
+The API is the stable application boundary for the current Streamlit UI and future
+frontends.  It never exposes direct ORM writes or synchronous external mutations.
 """
 from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException
+import hmac
+import os
+
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
+from app.config import get_settings
 from app.os.approvals import decide_approval, get_pending_approvals
 from app.os.bridge import migrate_legacy_to_os
 from app.os.dashboard import get_dashboard, list_orders, list_products
-from app.os.operations import (
-    approve_fulfillment_state,
-    execute_listing_publish,
-    request_listing_publish,
-    request_order_fulfillment,
-)
+from app.os.operations import approve_fulfillment_state, request_listing_publish, request_order_fulfillment
 from app.os.schema import ensure_os_schema, get_os_health
 from app.os.tasks import enqueue_task, get_task, list_tasks
 
 app = FastAPI(title="AutoSellerAI Seller OS API", version="3.0")
+
+
+def _require_control_token(authorization: str | None = Header(default=None)) -> None:
+    """Protect the control plane when SELLER_API_TOKEN is configured.
+
+    Local single-PC mode may omit the token because Docker binds the API to
+    localhost. Non-local environments must explicitly configure a token.
+    """
+    expected = str(os.getenv("SELLER_API_TOKEN", "") or "").strip()
+    env = str(get_settings().env or "local").strip().lower()
+    if not expected:
+        if env not in {"local", "dev", "development", "test"}:
+            raise HTTPException(status_code=503, detail="SELLER_API_TOKEN이 설정되지 않았습니다.")
+        return
+    supplied = str(authorization or "")
+    prefix = "Bearer "
+    if not supplied.startswith(prefix) or not hmac.compare_digest(supplied[len(prefix):], expected):
+        raise HTTPException(status_code=401, detail="유효한 Seller OS API 토큰이 필요합니다.")
+
+
+router = APIRouter(prefix="/api/v3", dependencies=[Depends(_require_control_token)])
 
 
 class TaskRequest(BaseModel):
@@ -57,27 +76,27 @@ def health() -> dict:
     return {"ok": True, "os": get_os_health()}
 
 
-@app.get("/api/v3/dashboard")
+@router.get("/dashboard")
 def dashboard() -> dict:
     return get_dashboard()
 
 
-@app.get("/api/v3/products")
+@router.get("/products")
 def products(status: str = "", keyword: str = "", limit: int = 100) -> list[dict]:
     return list_products(status=status, keyword=keyword, limit=limit)
 
 
-@app.get("/api/v3/orders")
+@router.get("/orders")
 def orders(status: str = "", limit: int = 100) -> list[dict]:
     return list_orders(status=status, limit=limit)
 
 
-@app.get("/api/v3/approvals")
+@router.get("/approvals")
 def approvals(limit: int = 100) -> list[dict]:
     return get_pending_approvals(limit=limit)
 
 
-@app.post("/api/v3/approvals/{approval_id}/decision")
+@router.post("/approvals/{approval_id}/decision")
 def approval_decision(approval_id: int, body: ApprovalDecision) -> dict:
     result = decide_approval(approval_id, approve=body.approve, actor=body.actor)
     if not result.get("ok"):
@@ -85,7 +104,7 @@ def approval_decision(approval_id: int, body: ApprovalDecision) -> dict:
     return result
 
 
-@app.post("/api/v3/listings/request")
+@router.post("/listings/request")
 def listing_request(body: ListingRequest) -> dict:
     result = request_listing_publish(body.product_id, body.platform, actor=body.actor)
     if not result.get("ok"):
@@ -93,15 +112,21 @@ def listing_request(body: ListingRequest) -> dict:
     return result
 
 
-@app.post("/api/v3/listings/execute/{approval_id}")
-def listing_execute(approval_id: int, actor: str = "user") -> dict:
-    result = execute_listing_publish(approval_id, actor=actor)
+@router.post("/listings/execute/{approval_id}")
+def listing_execute(approval_id: int) -> dict:
+    """Queue an already-approved listing mutation; never execute it in HTTP lifecycle."""
+    result = enqueue_task(
+        "listing_publish",
+        {"approval_id": int(approval_id)},
+        queue_name="dangerous",
+        dedupe_key=f"listing_publish:{int(approval_id)}",
+    )
     if not result.get("ok"):
-        raise HTTPException(status_code=409, detail=result.get("error", "등록 실행 실패"))
+        raise HTTPException(status_code=503, detail=result.get("error", "등록 작업 큐 실패"))
     return result
 
 
-@app.post("/api/v3/fulfillments/request")
+@router.post("/fulfillments/request")
 def fulfillment_request(body: FulfillmentRequest) -> dict:
     result = request_order_fulfillment(body.order_item_id, actor=body.actor)
     if not result.get("ok"):
@@ -109,7 +134,7 @@ def fulfillment_request(body: FulfillmentRequest) -> dict:
     return result
 
 
-@app.post("/api/v3/fulfillments/approve-state/{approval_id}")
+@router.post("/fulfillments/approve-state/{approval_id}")
 def fulfillment_approve_state(approval_id: int) -> dict:
     result = approve_fulfillment_state(approval_id)
     if not result.get("ok"):
@@ -117,25 +142,21 @@ def fulfillment_approve_state(approval_id: int) -> dict:
     return result
 
 
-@app.post("/api/v3/tasks")
+@router.post("/tasks")
 def task_enqueue(body: TaskRequest) -> dict:
-    result = enqueue_task(
-        body.task_type,
-        body.payload,
-        queue_name=body.queue_name,
-        dedupe_key=body.dedupe_key,
-    )
+    # Dangerous tasks still re-validate their approval inside the worker.
+    result = enqueue_task(body.task_type, body.payload, queue_name=body.queue_name, dedupe_key=body.dedupe_key)
     if not result.get("ok"):
         raise HTTPException(status_code=503, detail=result.get("error", "작업 큐 실패"))
     return result
 
 
-@app.get("/api/v3/tasks")
+@router.get("/tasks")
 def tasks(limit: int = 50) -> list[dict]:
     return list_tasks(limit=limit)
 
 
-@app.get("/api/v3/tasks/{task_id}")
+@router.get("/tasks/{task_id}")
 def task(task_id: int) -> dict:
     result = get_task(task_id)
     if not result:
@@ -143,7 +164,9 @@ def task(task_id: int) -> dict:
     return result
 
 
-@app.post("/api/v3/migrations/legacy-bridge")
+@router.post("/migrations/legacy-bridge")
 def legacy_bridge() -> dict:
-    # Read/reconcile only; no marketplace/supplier mutation.
     return migrate_legacy_to_os()
+
+
+app.include_router(router)
