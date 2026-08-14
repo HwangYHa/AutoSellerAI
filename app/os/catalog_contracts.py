@@ -1,0 +1,66 @@
+"""Strict supplier catalog contracts for Seller OS v3.
+
+Unknown commercial facts are represented as ``None``.  V3 must never invent origin,
+shipping fee, stock or lead time just to make a product look complete.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass(frozen=True)
+class SupplierCatalogVariant:
+    supplier_variant_id: str
+    option_key: str
+    option_values: dict[str, str] = field(default_factory=dict)
+    barcode: str = ""
+    supply_price_krw: int | None = None
+    stock_qty: int | None = None
+    status: str = "active"
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class SupplierCatalogItem:
+    supplier_code: str
+    supplier_product_id: str
+    name: str
+    source_url: str = ""
+    brand: str = ""
+    category: str = ""
+    origin: str = ""
+    material: str = ""
+    images: tuple[str, ...] = ()
+    detail_images: tuple[str, ...] = ()
+    detail_html: str = ""
+    shipping_fee_krw: int | None = None
+    moq: int | None = None
+    lead_time_days: int | None = None
+    variants: tuple[SupplierCatalogVariant, ...] = ()
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    def data_quality_errors(self) -> list[str]:
+        errors: list[str] = []
+        if not self.supplier_code.strip():
+            errors.append("SUPPLIER_REQUIRED")
+        if not self.supplier_product_id.strip():
+            errors.append("SUPPLIER_PRODUCT_ID_REQUIRED")
+        if not self.name.strip():
+            errors.append("PRODUCT_NAME_REQUIRED")
+        variants = self.variants or (
+            SupplierCatalogVariant(
+                supplier_variant_id="__default__",
+                option_key="__default__",
+            ),
+        )
+        for variant in variants:
+            if variant.supply_price_krw is None or int(variant.supply_price_krw) <= 0:
+                errors.append(f"SUPPLY_PRICE_UNKNOWN:{variant.option_key}")
+            if variant.stock_qty is None:
+                errors.append(f"STOCK_UNKNOWN:{variant.option_key}")
+        if self.shipping_fee_krw is None:
+            errors.append("SHIPPING_FEE_UNKNOWN")
+        if self.moq is None:
+            errors.append("MOQ_UNKNOWN")
+        return errors
