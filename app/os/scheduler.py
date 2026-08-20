@@ -47,12 +47,7 @@ def _bucket(interval_minutes: int, now: float | None = None) -> int:
 
 
 def schedule_due_jobs(redis: Redis | None = None, *, now: float | None = None) -> list[dict]:
-    """Enqueue due jobs without accumulating duplicates while a previous run is pending.
-
-    Redis bucket markers enforce the requested cadence. The DB/RQ dedupe key is
-    deliberately stable per task type so a stopped worker cannot create an
-    ever-growing queue every five minutes.
-    """
+    """Enqueue due jobs without accumulating duplicates while a previous run is pending."""
     if not _enabled():
         return []
     redis = redis or _redis()
@@ -85,11 +80,23 @@ def run_forever() -> None:
             now_mono = time.monotonic()
             if now_mono >= next_recovery_at:
                 recovery = recover_stale_safe_tasks(redis)
-                if recovery.get("recovered"):
+                if recovery.get("reconciled"):
+                    logger.info(
+                        "reconciled completed RQ jobs into DB journal count=%s ids=%s",
+                        recovery.get("reconciled"),
+                        recovery.get("reconciled_task_ids"),
+                    )
+                if recovery.get("orphaned"):
                     logger.warning(
-                        "recovered orphaned safe tasks count=%s ids=%s",
-                        recovery.get("recovered"),
-                        recovery.get("task_ids"),
+                        "marked missing safe RQ jobs orphaned count=%s ids=%s",
+                        recovery.get("orphaned"),
+                        recovery.get("orphaned_task_ids"),
+                    )
+                if recovery.get("failed"):
+                    logger.warning(
+                        "reconciled failed RQ jobs count=%s ids=%s",
+                        recovery.get("failed"),
+                        recovery.get("failed_task_ids"),
                     )
                 next_recovery_at = now_mono + 60.0
 
