@@ -20,7 +20,6 @@ from app.db import get_db
 from app.os.models import OSBackgroundTask
 from app.os.schema import ensure_os_schema
 
-
 QUEUE_NAMES = ("sync", "automation", "dangerous", "threads")
 QUEUE_BACKLOG_WARN = 20
 QUEUE_BACKLOG_CRITICAL = 100
@@ -45,13 +44,28 @@ def _database_health() -> dict[str, Any]:
     try:
         with get_db() as db:
             db.execute(text("SELECT 1"))
+            journal_mode = str(db.execute(text("PRAGMA journal_mode")).scalar() or "").lower()
+            busy_timeout = int(db.execute(text("PRAGMA busy_timeout")).scalar() or 0)
+            synchronous = int(db.execute(text("PRAGMA synchronous")).scalar() or 0)
         s = get_settings()
         path = Path(str(s.db_path or ""))
+        reasons: list[str] = []
+        status = "ok"
+        if journal_mode != "wal":
+            status = "degraded"
+            reasons.append(f"journal_mode={journal_mode or 'unknown'}")
+        if busy_timeout < 30_000:
+            status = "degraded"
+            reasons.append(f"busy_timeout={busy_timeout}ms")
         return {
-            "status": "ok",
+            "status": status,
             "path": str(path),
             "exists": path.exists() if str(path) else False,
             "size_bytes": path.stat().st_size if path.exists() else 0,
+            "journal_mode": journal_mode,
+            "busy_timeout_ms": busy_timeout,
+            "synchronous": synchronous,
+            "reason": "; ".join(reasons),
         }
     except Exception as exc:
         return {"status": "down", "error": f"{type(exc).__name__}: {exc}"[:300]}
@@ -134,6 +148,11 @@ def _task_journal_health() -> dict[str, Any]:
                 .filter(OSBackgroundTask.status == "failed", OSBackgroundTask.created_at >= now - timedelta(hours=24))
                 .count()
             )
+            recent_orphaned = (
+                db.query(OSBackgroundTask)
+                .filter(OSBackgroundTask.status == "orphaned", OSBackgroundTask.created_at >= now - timedelta(hours=24))
+                .count()
+            )
             active = (
                 db.query(OSBackgroundTask)
                 .filter(OSBackgroundTask.status.in_(["queued", "running"]))
@@ -150,7 +169,10 @@ def _task_journal_health() -> dict[str, Any]:
             reasons.append(f"{STALE_QUEUED_MINUTES}분 초과 queued {stale_queued}건")
         if recent_failed >= 5 and status == "ok":
             status = "degraded"
-            reasons.append(f"24시간 실패 {recent_failed}건")
+            reasons.append(f"24시간 실제 실패 {recent_failed}건")
+        if recent_orphaned and status == "ok":
+            status = "degraded"
+            reasons.append(f"24시간 큐 상태 유실(orphaned) {recent_orphaned}건")
 
         return {
             "status": status,
@@ -158,6 +180,7 @@ def _task_journal_health() -> dict[str, Any]:
             "stale_queued": stale_queued,
             "stale_running": stale_running,
             "failed_24h": recent_failed,
+            "orphaned_24h": recent_orphaned,
             "reason": "; ".join(reasons),
         }
     except Exception as exc:
@@ -185,7 +208,6 @@ def _configuration_health() -> dict[str, Any]:
 
 
 def get_runtime_health() -> dict[str, Any]:
-    """Return an operational readiness snapshot without mutating external systems."""
     database = _database_health()
     config = _configuration_health()
 
