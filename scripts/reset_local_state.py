@@ -1,6 +1,7 @@
 """Safely reset AutoSellerAI local SQLite/Redis state.
 
-Run with Docker services stopped. The script always creates a SQLite backup first.
+Keep Redis running, but stop application/API/worker/scheduler services before
+executing this tool. The script always creates a SQLite backup first.
 
 Examples:
   python scripts/reset_local_state.py --scope runtime --confirm RESET_RUNTIME
@@ -14,13 +15,14 @@ true destructive reset and therefore uses a different confirmation phrase.
 from __future__ import annotations
 
 import argparse
-import os
 import shutil
 import sqlite3
 from datetime import datetime
 from pathlib import Path
 
 from redis import Redis
+
+from app.config import get_settings
 
 
 RUNTIME_TABLES = (
@@ -36,7 +38,7 @@ RUNTIME_REDIS_PATTERNS = (
 
 
 def _db_path() -> Path:
-    return Path(os.getenv("DB_PATH", "data/autoseller.db")).resolve()
+    return Path(str(get_settings().db_path or "data/autoseller.db")).resolve()
 
 
 def _backup_database(db_path: Path) -> Path | None:
@@ -80,8 +82,7 @@ def _reset_runtime_sqlite(db_path: Path) -> list[str]:
 
 
 def _redis() -> Redis:
-    url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-    return Redis.from_url(url, socket_connect_timeout=3, socket_timeout=5)
+    return Redis.from_url(get_settings().redis_url, socket_connect_timeout=3, socket_timeout=5)
 
 
 def _delete_redis_patterns(redis: Redis, patterns: tuple[str, ...]) -> int:
