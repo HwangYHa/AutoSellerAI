@@ -20,7 +20,6 @@ from app.os.models import OSBackgroundTask
 from app.os.schema import ensure_os_schema
 from app.sqlite_runtime import retry_sqlite_write
 
-# Long sync jobs can legitimately exceed the old 30 minute RQ default.
 TASK_TIMEOUT_SECONDS: dict[str, int] = {
     "legacy_bridge": 1800,
     "catalog_sync": 3600,
@@ -44,6 +43,19 @@ def _loads(value: str) -> dict[str, Any]:
         return parsed if isinstance(parsed, dict) else {"value": parsed}
     except Exception:
         return {}
+
+
+def _with_task_meta(result: Any, **meta: Any) -> dict[str, Any]:
+    """Keep legacy result keys at the top level and reserve metadata under _task_meta."""
+    if isinstance(result, dict):
+        payload = dict(result)
+    else:
+        payload = {"value": result}
+    current = payload.get("_task_meta")
+    metadata = dict(current) if isinstance(current, dict) else {}
+    metadata.update(meta)
+    payload["_task_meta"] = metadata
+    return payload
 
 
 def _redis() -> Redis:
@@ -142,7 +154,6 @@ def _task_callable(task_type: str) -> Callable[[dict[str, Any]], Any]:
 
 
 def _persist_state(task_id: int, updater: Callable[[OSBackgroundTask], None]) -> bool:
-    """Persist one journal transition using a fresh transaction on every retry."""
     def operation() -> bool:
         ensure_os_schema()
         with get_db() as db:
@@ -157,7 +168,6 @@ def _persist_state(task_id: int, updater: Callable[[OSBackgroundTask], None]) ->
 
 
 def run_task(task_id: int) -> dict[str, Any]:
-    """RQ worker entrypoint. Importable by dotted path."""
     ensure_os_schema()
     with get_db() as db:
         row = db.query(OSBackgroundTask).filter_by(id=int(task_id)).first()
@@ -177,10 +187,12 @@ def run_task(task_id: int) -> dict[str, Any]:
         row.started_at = row.started_at or datetime.utcnow()
         row.finished_at = None
         row.error = ""
-        meta = _loads(row.result_json)
-        meta["rq_job_id"] = rq_job_id
-        meta["worker_started_at"] = datetime.utcnow().isoformat()
-        row.result_json = _dumps(meta)
+        current = _loads(row.result_json)
+        row.result_json = _dumps(_with_task_meta(
+            current,
+            rq_job_id=rq_job_id,
+            worker_started_at=datetime.utcnow().isoformat(),
+        ))
 
     _persist_state(task_id, mark_running)
 
@@ -191,10 +203,12 @@ def run_task(task_id: int) -> dict[str, Any]:
             row.status = "failed"
             row.error = f"{type(exc).__name__}: {exc}"[:4000]
             row.finished_at = datetime.utcnow()
-            meta = _loads(row.result_json)
-            meta["rq_job_id"] = rq_job_id
-            meta["worker_finished_at"] = row.finished_at.isoformat()
-            row.result_json = _dumps(meta)
+            current = _loads(row.result_json)
+            row.result_json = _dumps(_with_task_meta(
+                current,
+                rq_job_id=rq_job_id,
+                worker_finished_at=row.finished_at.isoformat(),
+            ))
 
         _persist_state(task_id, mark_failed)
         raise
@@ -204,11 +218,11 @@ def run_task(task_id: int) -> dict[str, Any]:
         row.progress_pct = 100
         row.error = ""
         row.finished_at = datetime.utcnow()
-        row.result_json = _dumps({
-            "rq_job_id": rq_job_id,
-            "worker_finished_at": row.finished_at.isoformat(),
-            "result": result,
-        })
+        row.result_json = _dumps(_with_task_meta(
+            result,
+            rq_job_id=rq_job_id,
+            worker_finished_at=row.finished_at.isoformat(),
+        ))
 
     _persist_state(task_id, mark_succeeded)
     return {"ok": True, "result": result}
@@ -272,14 +286,14 @@ def enqueue_task(
         )
 
         def mark_enqueued(row: OSBackgroundTask) -> None:
-            meta = _loads(row.result_json)
-            meta.update({
-                "rq_job_id": job.id,
-                "rq_timeout_seconds": _task_timeout(task_type),
-                "rq_result_ttl_seconds": RQ_RESULT_TTL_SECONDS,
-                "enqueued_at": datetime.utcnow().isoformat(),
-            })
-            row.result_json = _dumps(meta)
+            current = _loads(row.result_json)
+            row.result_json = _dumps(_with_task_meta(
+                current,
+                rq_job_id=job.id,
+                rq_timeout_seconds=_task_timeout(task_type),
+                rq_result_ttl_seconds=RQ_RESULT_TTL_SECONDS,
+                enqueued_at=datetime.utcnow().isoformat(),
+            ))
 
         _persist_state(task_id, mark_enqueued)
         return {"ok": True, "task_id": task_id, "rq_job_id": job.id, "status": "queued", "reused": False}
