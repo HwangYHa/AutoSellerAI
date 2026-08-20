@@ -27,7 +27,7 @@ def test_runtime_health_uses_worst_component_status():
     assert _worst("degraded", "down", "ok") == "down"
 
 
-def test_recovery_fails_only_orphaned_safe_tasks():
+def test_recovery_marks_only_missing_safe_tasks_orphaned():
     ensure_os_schema()
     now = datetime.utcnow()
     safe = _task("order_sync", "queued", now - timedelta(minutes=30))
@@ -45,15 +45,16 @@ def test_recovery_fails_only_orphaned_safe_tasks():
         result = recover_stale_safe_tasks(
             redis=object(),
             now=now,
-            job_active=lambda _redis, _job_id: False,
+            job_snapshot=lambda _redis, _job_id: {"exists": False, "status": "missing"},
         )
-        assert safe_id in result["task_ids"]
-        assert dangerous_id not in result["task_ids"]
+        assert safe_id in result["orphaned_task_ids"]
+        assert dangerous_id not in result["orphaned_task_ids"]
+        assert result["failed"] == 0
 
         with get_db() as db:
             safe_row = db.get(OSBackgroundTask, safe_id)
             dangerous_row = db.get(OSBackgroundTask, dangerous_id)
-            assert safe_row.status == "failed"
+            assert safe_row.status == "orphaned"
             assert "자동 복구" in safe_row.error
             assert dangerous_row.status == "queued"
     finally:
@@ -80,9 +81,10 @@ def test_recovery_keeps_safe_task_when_rq_job_is_active():
         result = recover_stale_safe_tasks(
             redis=object(),
             now=now,
-            job_active=lambda _redis, _job_id: True,
+            job_snapshot=lambda _redis, _job_id: {"exists": True, "status": "started"},
         )
-        assert result["recovered"] == 0
+        assert result["orphaned"] == 0
+        assert result["failed"] == 0
         assert task_id in result["kept_active"]
         with get_db() as db:
             assert db.get(OSBackgroundTask, task_id).status == "running"
