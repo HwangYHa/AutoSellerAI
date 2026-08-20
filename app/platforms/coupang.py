@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+import re
 import time
 from typing import Any
 from urllib.parse import urlparse
@@ -15,15 +16,6 @@ from app.config import get_settings
 logger = logging.getLogger(__name__)
 API = "https://api-gateway.coupang.com"
 
-CATEGORY_MAP = {
-    "의류": "56101", "패션": "56101", "티셔츠": "56101",
-    "이너": "56101", "나시": "56101", "여성": "56101",
-    "홈웨어": "56101", "잠옷": "56101", "레깅스": "56101",
-    "원피스": "56101", "블라우스": "56101", "바지": "56101",
-    "생활": "56137", "주방": "56148", "뷰티": "56120",
-    "전자": "56109", "식품": "56128", "스포츠": "56141",
-}
-
 _VALID_DELIVERY_CODES = {
     "CJGLS", "LOGEN", "HANJIN", "KDEXP", "POST",
     "LOTTE", "ILYANG", "DAESIN", "CHUNIL", "REGISTPOST",
@@ -34,6 +26,12 @@ _VALID_DELIVERY_CODES = {
 def _normalize_delivery_code(code: str) -> str:
     c = (code or "").strip().upper()
     return c if c in _VALID_DELIVERY_CODES else "CJGLS"
+
+
+def _plain_text(value: Any, limit: int = 4000) -> str:
+    text = re.sub(r"<[^>]+>", " ", str(value or ""))
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:limit]
 
 
 class CoupangUploader:
@@ -123,6 +121,93 @@ class CoupangUploader:
                 return name
         raise ValueError("쿠팡 반품지 이름을 조회하지 못했습니다. RETURN_CENTER_CODE를 확인하세요.")
 
+    def _category_is_valid(self, display_category_code: str | int) -> bool:
+        code = str(display_category_code or "").strip()
+        if not code.isdigit():
+            return False
+        path = (
+            "/v2/providers/seller_api/apis/api/v1/marketplace/meta/"
+            f"display-categories/{code}/status"
+        )
+        r = self._get(path)
+        if r.status_code != 200:
+            return False
+        try:
+            raw = r.json()
+        except Exception:
+            return False
+        api_code = str(raw.get("code") or "").upper() if isinstance(raw, dict) else ""
+        return api_code == "SUCCESS" and raw.get("data") is True
+
+    def _recommend_category(self, product: dict) -> tuple[str, str]:
+        name = str(product.get("name") or "").strip()
+        if not name:
+            raise ValueError("쿠팡 카테고리 추천에 사용할 상품명이 없습니다.")
+        description_parts = [
+            str(product.get("category") or ""),
+            _plain_text(product.get("detail_html"), 2500),
+            str(product.get("origin") or ""),
+            str(product.get("material") or ""),
+        ]
+        body: dict[str, Any] = {
+            "productName": name[:200],
+            "productDescription": " ".join(x for x in description_parts if x).strip()[:4000],
+            "brand": str(product.get("brand") or "")[:100],
+        }
+        attributes: dict[str, str] = {}
+        if product.get("origin"):
+            attributes["제조국"] = str(product.get("origin"))[:100]
+        if product.get("material"):
+            attributes["소재/원재료"] = str(product.get("material"))[:200]
+        if attributes:
+            body["attributes"] = attributes
+
+        path = "/v2/providers/openapi/apis/api/v1/categorization/predict"
+        r = self._post(path, body)
+        if r.status_code != 200:
+            raise ValueError(f"쿠팡 카테고리 추천 실패 HTTP {r.status_code}: {r.text[:400]}")
+        try:
+            raw = r.json()
+        except Exception as exc:
+            raise ValueError(f"쿠팡 카테고리 추천 응답 파싱 실패: {exc}") from exc
+        data = raw.get("data") if isinstance(raw, dict) else None
+        if not isinstance(data, dict):
+            raise ValueError(f"쿠팡 카테고리 추천 결과 없음: {str(raw)[:400]}")
+        result_type = str(data.get("autoCategorizationPredictionResultType") or "").upper()
+        code = str(data.get("predictedCategoryId") or "").strip()
+        category_name = str(data.get("predictedCategoryName") or "").strip()
+        if result_type != "SUCCESS" or not code.isdigit():
+            comment = str(data.get("comment") or raw.get("message") or "추천 실패")
+            raise ValueError(f"쿠팡 카테고리 추천 실패: {comment[:300]}")
+        if not self._category_is_valid(code):
+            raise ValueError(
+                f"쿠팡이 추천한 노출카테고리({code}{' · ' + category_name if category_name else ''})가 현재 사용 불가합니다. "
+                "카테고리 재추천 또는 Wing 카테고리 확인이 필요합니다."
+            )
+        return code, category_name
+
+    def _resolve_display_category(self, product: dict) -> tuple[str, str]:
+        explicit = str(
+            product.get("display_category_code")
+            or product.get("coupang_category_code")
+            or product.get("category_code")
+            or ""
+        ).strip()
+        category_field = str(product.get("category") or "").strip()
+        if not explicit and category_field.isdigit():
+            explicit = category_field
+
+        if explicit:
+            if self._category_is_valid(explicit):
+                return explicit, ""
+            logger.warning(
+                "쿠팡 지정 카테고리 %s가 유효하지 않아 상품명 기반 추천으로 재선정합니다: %s",
+                explicit,
+                product.get("name"),
+            )
+
+        return self._recommend_category(product)
+
     @staticmethod
     def _contents(product: dict, images: list[str], detail_images: list[str]) -> list[dict]:
         contents: list[dict] = []
@@ -205,10 +290,15 @@ class CoupangUploader:
         return items
 
     def create_product(self, product: dict) -> dict:
-        """Create a Coupang marketplace product using the official flat request schema."""
+        """Create a Coupang marketplace product after resolving a live valid category."""
         self._require_listing_settings()
-        cat_raw = str(product.get("category") or "")
-        display_cat = next((v for k, v in CATEGORY_MAP.items() if k in cat_raw), "56101")
+        display_cat, display_cat_name = self._resolve_display_category(product)
+        logger.info(
+            "쿠팡 노출카테고리 결정 product=%s code=%s name=%s",
+            str(product.get("name") or "")[:120],
+            display_cat,
+            display_cat_name or "(explicit)",
+        )
         images = [u for u in product.get("images", []) if isinstance(u, str) and u.startswith("http")]
         detail_images = [u for u in product.get("detail_images", []) if isinstance(u, str) and u.startswith("http")]
         if not images:
@@ -267,7 +357,14 @@ class CoupangUploader:
             seller_product_id = candidate
         if not seller_product_id:
             raise ValueError(f"쿠팡 상품등록 응답에서 sellerProductId를 찾지 못했습니다: {str(raw)[:500]}")
-        return {"data": {"sellerProductId": str(seller_product_id)}, "raw": raw}
+        return {
+            "data": {
+                "sellerProductId": str(seller_product_id),
+                "displayCategoryCode": str(display_cat),
+                "displayCategoryName": display_cat_name,
+            },
+            "raw": raw,
+        }
 
     @staticmethod
     def _get_public_ip() -> str:
