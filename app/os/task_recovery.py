@@ -51,6 +51,24 @@ def _dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
 
 
+def _with_task_meta(result: Any, **meta: Any) -> dict[str, Any]:
+    if isinstance(result, dict):
+        payload = dict(result)
+    else:
+        payload = {"value": result}
+    current = payload.get("_task_meta")
+    task_meta = dict(current) if isinstance(current, dict) else {}
+    task_meta.update(meta)
+    payload["_task_meta"] = task_meta
+    return payload
+
+
+def _task_meta(value: str) -> dict[str, Any]:
+    payload = _loads(value)
+    meta = payload.get("_task_meta")
+    return meta if isinstance(meta, dict) else payload
+
+
 def _rq_job_snapshot(redis: Redis, job_id: str) -> dict[str, Any]:
     try:
         job = Job.fetch(job_id, connection=redis)
@@ -76,12 +94,12 @@ def _persist_reconciliation(task_id: int, status: str, *, result: Any = None, er
             row.status = status
             row.finished_at = now if status in {"succeeded", "failed", "orphaned", "cancelled"} else row.finished_at
             row.error = error[:4000]
-            meta = _loads(row.result_json)
-            meta["reconciled_at"] = now.isoformat()
-            meta["reconciled_status"] = status
-            if result is not None:
-                meta["result"] = result
-            row.result_json = _dumps(meta)
+            current = result if result is not None else _loads(row.result_json)
+            row.result_json = _dumps(_with_task_meta(
+                current,
+                reconciled_at=now.isoformat(),
+                reconciled_status=status,
+            ))
             if status == "succeeded":
                 row.progress_pct = 100
             db.commit()
@@ -138,12 +156,11 @@ def recover_stale_safe_tasks(
         if not stale:
             continue
 
-        meta = _loads(row["result_json"])
+        meta = _task_meta(row["result_json"])
         job_id = str(meta.get("rq_job_id") or f"os-task-{row['id']}")
         try:
             snap = snapshotter(redis, job_id)
         except Exception:
-            # Redis inspection failure is not evidence that execution vanished.
             kept.append(row["id"])
             continue
 
