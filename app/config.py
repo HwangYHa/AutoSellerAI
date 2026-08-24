@@ -70,6 +70,17 @@ class Settings(BaseSettings):
     ownerclan_password: str = ""
     ownerclan_environment: str = "production"
 
+    # 자동 주문/발주/송장 연동 정책
+    # 실제 공급처 결제가 발생할 수 있으므로 기본값은 OFF. 사용자가 로컬 .env에서 명시적으로 켠다.
+    fulfillment_auto_purchase_enabled: bool = False
+    fulfillment_auto_tracking_enabled: bool = True
+    fulfillment_poll_interval_seconds: int = 60
+    fulfillment_max_order_krw: int = 100000
+    fulfillment_min_profit_krw: int = 500
+    fulfillment_min_margin_pct: float = 0.05
+    fulfillment_supplier_allowlist: str = ""
+    fulfillment_max_items_per_cycle: int = 50
+
     # 네이버 쇼핑 검색 + 데이터랩
     naver_search_client_id: str = ""
     naver_search_client_secret: str = ""
