@@ -1,8 +1,8 @@
-"""Seller OS safe recurring scheduler.
+"""Seller OS recurring scheduler.
 
-The scheduler never performs business work and never queues dangerous mutations.
-It only places deduplicated safe sync/reconcile tasks onto Redis/RQ. A short Redis
-leader lease prevents duplicate schedules if multiple scheduler processes start.
+Safe polling/reconciliation tasks are deduplicated in Redis/RQ. The fulfillment
+cycle may enqueue a dangerous supplier_order only when the operator has explicitly
+enabled automatic purchasing and the policy/verified-driver gates all pass.
 """
 from __future__ import annotations
 
@@ -19,7 +19,10 @@ from app.os.tasks import enqueue_task
 logger = logging.getLogger(__name__)
 
 SAFE_JOBS = {
-    "order_sync": {"interval_env": "SELLER_ORDER_SYNC_MINUTES", "default_minutes": 5, "payload": {"hours": 24}, "queue": "sync"},
+    # Marketplace APIs currently use polling in this application. One minute is the
+    # practical near-real-time cadence without stacking duplicate work.
+    "order_sync": {"interval_env": "SELLER_ORDER_SYNC_MINUTES", "default_minutes": 1, "payload": {"hours": 24}, "queue": "sync"},
+    "fulfillment_cycle": {"interval_env": "SELLER_FULFILLMENT_MINUTES", "default_minutes": 1, "payload": {}, "queue": "automation"},
     "catalog_sync": {"interval_env": "SELLER_CATALOG_SYNC_MINUTES", "default_minutes": 60, "payload": {}, "queue": "sync"},
     "data_reconcile": {"interval_env": "SELLER_RECONCILE_MINUTES", "default_minutes": 30, "payload": {"remote": False}, "queue": "sync"},
 }
@@ -72,7 +75,7 @@ def schedule_due_jobs(redis: Redis | None = None, *, now: float | None = None) -
 
 def run_forever() -> None:
     logging.basicConfig(level=getattr(logging, str(get_settings().log_level).upper(), logging.INFO))
-    logger.info("Seller OS safe scheduler started")
+    logger.info("Seller OS scheduler started")
     next_recovery_at = 0.0
     while True:
         try:
