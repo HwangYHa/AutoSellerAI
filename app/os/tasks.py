@@ -24,6 +24,7 @@ TASK_TIMEOUT_SECONDS: dict[str, int] = {
     "legacy_bridge": 1800,
     "catalog_sync": 3600,
     "order_sync": 5400,
+    "fulfillment_cycle": 1800,
     "data_reconcile": 3600,
     "image_repair": 7200,
     "listing_publish": 1800,
@@ -104,12 +105,19 @@ def _task_callable(task_type: str) -> Callable[[dict[str, Any]], Any]:
             }
         return sync_orders
 
+    if task_type == "fulfillment_cycle":
+        def fulfillment_cycle(payload: dict[str, Any]) -> Any:
+            from app.os.fulfillment_automation import run_fulfillment_cycle
+            limit = payload.get("limit")
+            return run_fulfillment_cycle(limit=int(limit) if limit else None)
+        return fulfillment_cycle
+
     if task_type == "data_reconcile":
         def reconcile(payload: dict[str, Any]) -> Any:
             from app.services.data_graph import reconcile_data_graph
             from app.os.bridge import migrate_legacy_to_os
             return {
-                "legacy_graph": reconcile_data_graph(fetch_remote_identities=bool(payload.get("remote", False))),
+                "legacy_graph": reconcile_data_graph(fetch_remote_identities=bool(payload.get("remote", False)),),
                 "bridge": migrate_legacy_to_os(),
             }
         return reconcile
