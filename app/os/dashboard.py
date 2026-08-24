@@ -41,7 +41,11 @@ def get_dashboard() -> dict[str, Any]:
 
 
 def get_work_queue(limit: int = 100) -> list[dict[str, Any]]:
-    """Return only items that require a human decision or exception handling."""
+    """Return only items that require a human decision or exception handling.
+
+    Error records whose display payload has been explicitly cleared by the operator
+    remain truthful in their business status, but no longer clutter '오늘 할 일'.
+    """
     ensure_os_schema()
     result: list[dict[str, Any]] = []
     for approval in get_pending_approvals(limit=limit):
@@ -59,7 +63,10 @@ def get_work_queue(limit: int = 100) -> list[dict[str, Any]]:
     with get_db() as db:
         exceptions = (
             db.query(OSSalesOrderItem)
-            .filter_by(status="exception")
+            .filter(
+                OSSalesOrderItem.status == "exception",
+                OSSalesOrderItem.exception_code != "",
+            )
             .order_by(OSSalesOrderItem.updated_at.asc())
             .limit(limit)
             .all()
@@ -78,7 +85,10 @@ def get_work_queue(limit: int = 100) -> list[dict[str, Any]]:
 
         failed_fulfillments = (
             db.query(OSFulfillment)
-            .filter_by(status="failed")
+            .filter(
+                OSFulfillment.status == "failed",
+                (OSFulfillment.failure_code != "") | (OSFulfillment.failure_message != ""),
+            )
             .order_by(OSFulfillment.updated_at.asc())
             .limit(limit)
             .all()
@@ -97,7 +107,7 @@ def get_work_queue(limit: int = 100) -> list[dict[str, Any]]:
 
         failed_tasks = (
             db.query(OSBackgroundTask)
-            .filter_by(status="failed")
+            .filter(OSBackgroundTask.status.in_(["failed", "orphaned"]))
             .order_by(OSBackgroundTask.created_at.desc())
             .limit(20)
             .all()
@@ -165,7 +175,7 @@ def list_orders(*, status: str = "", limit: int = 100) -> list[dict[str, Any]]:
                 "status": order.status,
                 "receiver": order.receiver_name,
                 "items": len(items),
-                "exceptions": sum(1 for x in items if x.status == "exception"),
+                "exceptions": sum(1 for x in items if x.status == "exception" and x.exception_code),
                 "amount_krw": sum(int(x.unit_sale_price_krw or 0) * int(x.quantity or 0) for x in items),
                 "ordered_at": order.ordered_at,
             })
