@@ -11,6 +11,12 @@ from app.os.approvals import decide_approval
 from app.os.bridge import migrate_legacy_to_os
 from app.os.connections import get_connection_summary
 from app.os.dashboard import get_dashboard, list_orders, list_products
+from app.os.data_reset import (
+    FULL_RESET_CONFIRMATION,
+    clear_work_queue_errors,
+    get_full_reset_preview,
+    reset_all_data,
+)
 from app.os.operations import approve_fulfillment_state, request_listing_publish, request_order_fulfillment
 from app.os.queries import get_operations_summary, get_order_detail, get_product_detail, get_profit_summary
 from app.os.schema import ensure_os_schema, get_os_health
@@ -24,7 +30,7 @@ _STATUS_KO = {
     "completed": "완료", "cancelled": "취소", "pending": "대기", "pending_approval": "승인 대기",
     "approved": "승인됨", "ordered": "발주됨", "failed": "실패", "succeeded": "성공",
     "queued": "대기", "running": "실행중", "settled": "정산 확정", "provisional": "정산 잠정",
-    "estimated": "예상",
+    "estimated": "예상", "orphaned": "상태 유실",
 }
 
 
@@ -54,8 +60,6 @@ def _external_id(value: str) -> str:
 
 def _bootstrap() -> None:
     ensure_os_schema()
-    # One-time transitional bridge per browser session.  It changes only local DB
-    # rows and does not call marketplace/supplier mutation APIs.
     if not st.session_state.get("os_bridge_done"):
         try:
             st.session_state["os_bridge_result"] = migrate_legacy_to_os()
@@ -104,8 +108,6 @@ def _approve_work(row: dict) -> None:
         return
 
     if action_type == "supplier.order":
-        # Approval changes only local fulfillment state.  No supplier API is called
-        # until a verified v3 SupplierOrderPort driver is installed for that supplier.
         moved = approve_fulfillment_state(approval_id)
         if moved.get("ok"):
             st.success("발주 승인 완료 · 검증된 공급처 주문 드라이버가 있을 때만 실제 실행됩니다.")
@@ -129,8 +131,27 @@ def _work_queue() -> None:
     d.metric("실제 순이익", _krw(m["profit_krw"]))
     e.metric("내가 처리할 일", len(work))
 
-    st.markdown("### 오늘 할 일")
-    st.caption("자동화가 처리하지 못했거나 실제 비용·외부 변경 때문에 사람 판단이 필요한 항목만 표시합니다.")
+    title_col, clear_col = st.columns([5, 1.5], vertical_alignment="bottom")
+    with title_col:
+        st.markdown("### 오늘 할 일")
+        st.caption("자동화가 처리하지 못했거나 실제 비용·외부 변경 때문에 사람 판단이 필요한 항목만 표시합니다.")
+    with clear_col:
+        if st.button(
+            "🧹 오류 데이터 초기화",
+            key="clear_today_work_errors",
+            use_container_width=True,
+            help="주문/발주 상태는 보존하고 오류코드·실패메시지·실패 작업기록만 정리합니다.",
+        ):
+            try:
+                result = clear_work_queue_errors(actor="seller")
+                st.success(
+                    f"오류 데이터 {result['total']}건 정리 · "
+                    f"자동화 {result['failed_tasks']} / 주문예외 {result['order_exceptions']} / 발주오류 {result['fulfillment_errors']}"
+                )
+                st.rerun()
+            except Exception as exc:
+                st.error(f"오류 데이터 초기화 실패: {exc}")
+
     if not work:
         st.success("현재 직접 처리해야 할 업무가 없습니다.")
     for row in work:
@@ -312,16 +333,18 @@ def _settings() -> None:
     ], use_container_width=True, hide_index=True)
 
     st.markdown("#### 안전 자동화")
-    cols = st.columns(4)
+    cols = st.columns(5)
     actions = [
         (cols[0], "카탈로그 동기화", "catalog_sync", {}, "catalog_sync"),
         (cols[1], "주문 동기화", "order_sync", {"hours": 24}, "order_sync"),
-        (cols[2], "데이터 관계 복구", "data_reconcile", {"remote": True}, "data_reconcile"),
-        (cols[3], "전체 이미지 복구", "image_repair", {"include_marketplaces": True}, "image_repair"),
+        (cols[2], "발주·송장 사이클", "fulfillment_cycle", {}, "fulfillment_cycle"),
+        (cols[3], "데이터 관계 복구", "data_reconcile", {"remote": True}, "data_reconcile"),
+        (cols[4], "전체 이미지 복구", "image_repair", {"include_marketplaces": True}, "image_repair"),
     ]
     for col, label, task_type, payload, dedupe in actions:
         if col.button(label, use_container_width=True, key=f"task_{task_type}"):
-            r = enqueue_task(task_type, payload, queue_name="sync", dedupe_key=dedupe)
+            queue_name = "automation" if task_type == "fulfillment_cycle" else "sync"
+            r = enqueue_task(task_type, payload, queue_name=queue_name, dedupe_key=dedupe)
             st.success(f"작업 #{r['task_id']} 접수") if r.get("ok") else st.error(r.get("error", "작업 큐 실패"))
 
     st.markdown("#### 데이터 건강도")
@@ -339,6 +362,50 @@ def _settings() -> None:
         st.dataframe(ops["operations"], use_container_width=True, hide_index=True) if ops["operations"] else st.info("외부 변경 작업 이력이 없습니다.")
     with t3:
         st.dataframe(ops["audit"], use_container_width=True, hide_index=True) if ops["audit"] else st.info("감사 이력이 없습니다.")
+
+    st.markdown("---")
+    with st.expander("⚠️ 전체 데이터 초기화", expanded=False):
+        st.error("상품 · 주문 · 발주 · 정산 · Threads 자격증명 · 로그 · Redis 작업상태 등 로컬 애플리케이션 데이터를 모두 삭제합니다. .env와 소스코드는 유지됩니다.")
+        try:
+            preview = get_full_reset_preview()
+            p1, p2, p3 = st.columns(3)
+            p1.metric("초기화 대상 테이블", len(preview.get("tables") or {}))
+            p2.metric("현재 데이터 행", preview.get("rows", 0))
+            p3.metric("실행/대기 작업", preview.get("active_tasks", 0))
+            if preview.get("dialect") != "sqlite":
+                st.warning("이 UI 초기화 기능은 로컬 SQLite에서만 사용할 수 있습니다.")
+        except Exception as exc:
+            preview = {"dialect": "unknown", "active_tasks": -1, "rows": 0, "tables": {}}
+            st.error(f"초기화 대상 조회 실패: {exc}")
+
+        confirmation = st.text_input(
+            f"실행하려면 {FULL_RESET_CONFIRMATION} 입력",
+            key="seller_os_full_reset_confirmation",
+            placeholder=FULL_RESET_CONFIRMATION,
+        )
+        enabled = (
+            confirmation.strip() == FULL_RESET_CONFIRMATION
+            and preview.get("dialect") == "sqlite"
+            and int(preview.get("active_tasks", 0)) == 0
+        )
+        if st.button(
+            "모든 데이터 완전 초기화",
+            key="seller_os_full_reset_button",
+            type="primary",
+            use_container_width=True,
+            disabled=not enabled,
+        ):
+            try:
+                result = reset_all_data(confirmation=confirmation, actor="seller")
+                if result.get("ok"):
+                    st.session_state.clear()
+                    st.success(result.get("message", "전체 데이터 초기화 완료"))
+                    st.rerun()
+                else:
+                    st.error(result.get("error", "전체 데이터 초기화 실패"))
+            except Exception as exc:
+                st.error(f"전체 데이터 초기화 실패: {exc}")
+
     st.info("재고 사입 PurchaseOrder/MOQ는 위탁판매 기본 업무에서 제외합니다. 외부 변경은 Approval + Idempotency Gate를 통과합니다.")
 
 
