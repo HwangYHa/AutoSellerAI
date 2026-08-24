@@ -18,6 +18,8 @@ from app.os.tasks import enqueue_task
 
 logger = logging.getLogger(__name__)
 
+MAINTENANCE_RESET_KEY = "seller-os:maintenance:reset"
+
 SAFE_JOBS = {
     # Marketplace APIs currently use polling in this application. One minute is the
     # practical near-real-time cadence without stacking duplicate work.
@@ -54,6 +56,8 @@ def schedule_due_jobs(redis: Redis | None = None, *, now: float | None = None) -
     if not _enabled():
         return []
     redis = redis or _redis()
+    if redis.exists(MAINTENANCE_RESET_KEY):
+        return []
     timestamp = now or time.time()
     results: list[dict] = []
     for task_type, spec in SAFE_JOBS.items():
@@ -80,6 +84,10 @@ def run_forever() -> None:
     while True:
         try:
             redis = _redis()
+            if redis.exists(MAINTENANCE_RESET_KEY):
+                logger.warning("Seller OS maintenance reset lock active; scheduling paused")
+                time.sleep(30)
+                continue
             now_mono = time.monotonic()
             if now_mono >= next_recovery_at:
                 recovery = recover_stale_safe_tasks(redis)
