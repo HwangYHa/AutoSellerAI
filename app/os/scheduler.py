@@ -31,6 +31,10 @@ DEFAULT_JOBS = {
     "data_reconcile": {"default_minutes": 30, "payload": {"remote": False}, "queue": "sync", "description": "데이터 관계 정합성 복구"},
 }
 
+# Backward-compatible public name used by existing tests and integrations. Runtime
+# scheduling is DB-driven; this map is only the immutable seed/default contract.
+SAFE_JOBS = DEFAULT_JOBS
+
 
 def _enabled() -> bool:
     return str(os.getenv("SELLER_SCHEDULER_ENABLED", "true")).strip().lower() in {"1", "true", "yes", "on", "y"}
@@ -74,34 +78,51 @@ def _job_rules() -> list[dict]:
         for row in rows:
             try:
                 payload = json.loads(row.payload_json or "{}")
-                if not isinstance(payload, dict): payload = {}
+                if not isinstance(payload, dict):
+                    payload = {}
             except Exception:
                 payload = {}
             result.append({
-                "id": row.id, "task_type": row.task_type, "enabled": bool(row.enabled),
+                "id": row.id,
+                "task_type": row.task_type,
+                "enabled": bool(row.enabled),
                 "interval_minutes": max(1, int(row.interval_minutes or 1)),
-                "queue": row.queue_name or "sync", "payload": payload,
+                "queue": row.queue_name or "sync",
+                "payload": payload,
             })
         return result
 
 
 def schedule_due_jobs(redis: Redis | None = None, *, now: float | None = None) -> list[dict]:
-    if not _enabled(): return []
+    if not _enabled():
+        return []
     redis = redis or _redis()
-    if redis.exists(MAINTENANCE_RESET_KEY): return []
-    timestamp = now or time.time(); results: list[dict] = []
+    if redis.exists(MAINTENANCE_RESET_KEY):
+        return []
+    timestamp = now or time.time()
+    results: list[dict] = []
     for spec in _job_rules():
-        if not spec["enabled"]: continue
-        task_type = spec["task_type"]; interval = spec["interval_minutes"]
+        if not spec["enabled"]:
+            continue
+        task_type = spec["task_type"]
+        interval = spec["interval_minutes"]
         bucket = _bucket(interval, timestamp)
         marker = f"seller-os:schedule:{task_type}:{bucket}"
         claimed = redis.set(marker, "1", nx=True, ex=max(120, interval * 60 * 2))
-        if not claimed: continue
-        result = enqueue_task(task_type, dict(spec["payload"]), queue_name=str(spec["queue"]), dedupe_key=f"scheduled:{task_type}")
+        if not claimed:
+            continue
+        result = enqueue_task(
+            task_type,
+            dict(spec["payload"]),
+            queue_name=str(spec["queue"]),
+            dedupe_key=f"scheduled:{task_type}",
+        )
         if result.get("ok"):
             with get_db() as db:
                 row = db.query(OSSchedulerRule).filter_by(id=int(spec["id"])).first()
-                if row: row.last_enqueued_at = datetime.utcnow(); db.commit()
+                if row:
+                    row.last_enqueued_at = datetime.utcnow()
+                    db.commit()
         results.append({"task_type": task_type, "interval_minutes": interval, **result})
     return results
 
@@ -114,13 +135,18 @@ def run_forever() -> None:
         try:
             redis = _redis()
             if redis.exists(MAINTENANCE_RESET_KEY):
-                logger.warning("Seller OS maintenance reset lock active; scheduling paused"); time.sleep(30); continue
+                logger.warning("Seller OS maintenance reset lock active; scheduling paused")
+                time.sleep(30)
+                continue
             now_mono = time.monotonic()
             if now_mono >= next_recovery_at:
                 recovery = recover_stale_safe_tasks(redis)
-                if recovery.get("reconciled"): logger.info("reconciled completed RQ jobs count=%s ids=%s", recovery.get("reconciled"), recovery.get("reconciled_task_ids"))
-                if recovery.get("orphaned"): logger.warning("marked missing safe RQ jobs orphaned count=%s ids=%s", recovery.get("orphaned"), recovery.get("orphaned_task_ids"))
-                if recovery.get("failed"): logger.warning("reconciled failed RQ jobs count=%s ids=%s", recovery.get("failed"), recovery.get("failed_task_ids"))
+                if recovery.get("reconciled"):
+                    logger.info("reconciled completed RQ jobs count=%s ids=%s", recovery.get("reconciled"), recovery.get("reconciled_task_ids"))
+                if recovery.get("orphaned"):
+                    logger.warning("marked missing safe RQ jobs orphaned count=%s ids=%s", recovery.get("orphaned"), recovery.get("orphaned_task_ids"))
+                if recovery.get("failed"):
+                    logger.warning("reconciled failed RQ jobs count=%s ids=%s", recovery.get("failed"), recovery.get("failed_task_ids"))
                 next_recovery_at = now_mono + 60.0
             for row in schedule_due_jobs(redis):
                 logger.info("scheduled %s task_id=%s ok=%s", row["task_type"], row.get("task_id"), row.get("ok"))
@@ -129,4 +155,5 @@ def run_forever() -> None:
         time.sleep(30)
 
 
-if __name__ == "__main__": run_forever()
+if __name__ == "__main__":
+    run_forever()
