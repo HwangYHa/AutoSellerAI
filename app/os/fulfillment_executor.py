@@ -2,6 +2,8 @@
 
 This module is the only v3 path allowed to call a supplier order driver. It is
 intended for the ``dangerous`` RQ worker after an explicit supplier.order approval.
+Interactive-card suppliers are routed through Payment Orchestrator and never marked
+ordered until the supplier confirms that payment succeeded.
 """
 from __future__ import annotations
 
@@ -12,7 +14,7 @@ from app.db import get_db
 from app.os.approvals import execute_idempotent, make_idempotency_key
 from app.os.drivers import get_supplier_order_driver
 from app.os.models import OSApprovalRequest, OSFulfillment, OSSalesOrder, OSSalesOrderItem, OSSupplierOffer
-from app.os.ports import SupplierOrderCommand
+from app.os.ports import SupplierOrderCommand, SupplierPaymentPort
 from app.os.quality_models import OSOfferVerification
 from app.os.schema import ensure_os_schema
 from app.os.state import FULFILLMENT_STATES, ORDER_ITEM_STATES
@@ -59,8 +61,6 @@ def execute_supplier_order(approval_id: int, *, actor: str = "worker") -> dict:
         approved_verification_id = int(payload.get("supplier_offer_verification_id") or 0)
         if approved_verification_id and approved_verification_id != int(verification.id):
             return {"ok": False, "error": "승인 이후 공급처 검증 레코드가 변경되었습니다. 새 승인이 필요합니다."}
-
-        # Approval payload freezes the exact commercial terms the user reviewed.
         if int(payload.get("supplier_offer_id") or 0) != int(offer.id):
             return {"ok": False, "error": "승인 이후 공급처 Offer 연결이 변경되었습니다. 새 승인이 필요합니다."}
         if int(payload.get("quantity") or 0) != int(item.quantity or 0):
@@ -113,13 +113,37 @@ def execute_supplier_order(approval_id: int, *, actor: str = "worker") -> dict:
             fulfillment.failure_code = ""
             fulfillment.failure_message = ""
             db.commit()
+        fulfillment_id = int(fulfillment.id)
 
     def executor():
         simulation = driver.simulate(command)
+        if isinstance(driver, SupplierPaymentPort):
+            from app.os.payment_orchestrator import prepare_payment
+            prepared = prepare_payment(
+                fulfillment_id,
+                driver=driver,
+                command=command,
+                simulation=simulation,
+                expected_amount_krw=expected_supply + expected_shipping,
+            )
+            if not prepared.get("ok"):
+                raise RuntimeError(prepared.get("error") or "공급처 결제 준비 실패")
+            return {
+                "payment_pending": prepared.get("payment_status") in {"awaiting_user", "authorizing"},
+                "payment_session_id": prepared.get("payment_session_id"),
+                "payment_mode": prepared.get("payment_mode"),
+                "payment_status": prepared.get("payment_status"),
+                "payment_url": prepared.get("payment_url", ""),
+                "user_action_required": bool(prepared.get("user_action_required")),
+                "supplier_order_id": prepared.get("supplier_order_id", ""),
+                "amount_krw": expected_supply + expected_shipping,
+            }
+
         result = driver.create_order(command, simulation=simulation)
         if not result.ok or not result.supplier_order_id:
             raise RuntimeError(result.error or "공급처 주문 생성 실패")
         return {
+            "payment_pending": False,
             "supplier_order_id": result.supplier_order_id,
             "status": result.status,
             "amount_krw": result.amount_krw,
@@ -145,19 +169,26 @@ def execute_supplier_order(approval_id: int, *, actor: str = "worker") -> dict:
         if fulfillment:
             if execution.get("ok"):
                 response = execution.get("response") or {}
-                if fulfillment.status == "ordering":
-                    FULFILLMENT_STATES.require("ordering", "ordered")
-                fulfillment.status = "ordered"
-                fulfillment.supplier_order_id = str(response.get("supplier_order_id") or "")
-                fulfillment.ordered_at = datetime.utcnow()
-                fulfillment.delivery_company = str(response.get("delivery_company") or "")
-                fulfillment.tracking_number = str(response.get("tracking_number") or "")
-                actual = int(response.get("amount_krw") or 0)
-                if actual > 0:
-                    fulfillment.supply_cost_krw = actual
-                if item and item.status == "approved":
-                    ORDER_ITEM_STATES.require("approved", "ordered")
-                    item.status = "ordered"
+                if response.get("payment_pending"):
+                    # An issuer/card-app approval is still outstanding.  Do not lie to
+                    # downstream shipment automation by marking this order as ordered.
+                    fulfillment.status = "ordering"
+                    if response.get("supplier_order_id"):
+                        fulfillment.supplier_order_id = str(response.get("supplier_order_id"))
+                else:
+                    if fulfillment.status == "ordering":
+                        FULFILLMENT_STATES.require("ordering", "ordered")
+                    fulfillment.status = "ordered"
+                    fulfillment.supplier_order_id = str(response.get("supplier_order_id") or "")
+                    fulfillment.ordered_at = datetime.utcnow()
+                    fulfillment.delivery_company = str(response.get("delivery_company") or "")
+                    fulfillment.tracking_number = str(response.get("tracking_number") or "")
+                    actual = int(response.get("amount_krw") or 0)
+                    if actual > 0:
+                        fulfillment.supply_cost_krw = actual
+                    if item and item.status == "approved":
+                        ORDER_ITEM_STATES.require("approved", "ordered")
+                        item.status = "ordered"
             else:
                 fulfillment.status = "failed"
                 fulfillment.failure_code = "SUPPLIER_ORDER_FAILED"
