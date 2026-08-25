@@ -123,3 +123,27 @@ class OSPaymentSession(Base):
     paid_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class OSInventoryAutomationState(Base):
+    """Hysteresis state for external sold-out/restock mutations.
+
+    A single supplier timeout/zero response must never disable a marketplace listing.
+    The automation therefore requires consecutive observations before mutating the
+    external channel and remembers only states it changed itself.
+    """
+
+    __tablename__ = "os_inventory_automation_states"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    product_id: Mapped[int] = mapped_column(ForeignKey("os_products.id", ondelete="CASCADE"), unique=True, index=True)
+    low_stock_confirmations: Mapped[int] = mapped_column(Integer, default=0)
+    restock_confirmations: Mapped[int] = mapped_column(Integer, default=0)
+    auto_sold_out: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    last_observed_stock: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_action: Mapped[str] = mapped_column(String(40), default="", index=True)
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_action_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
