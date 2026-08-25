@@ -44,6 +44,31 @@ class TrackingResult:
     error: str = ""
 
 
+@dataclass(frozen=True)
+class PaymentPreparationResult:
+    """Result of preparing a supplier payment without completing user authorization."""
+    ok: bool
+    payment_mode: str = "unknown"
+    payment_url: str = ""
+    external_payment_id: str = ""
+    expected_amount_krw: int = 0
+    user_action_required: bool = False
+    supplier_order_id: str = ""
+    raw: dict[str, Any] = field(default_factory=dict)
+    error: str = ""
+
+
+@dataclass(frozen=True)
+class PaymentStatusResult:
+    ok: bool
+    status: str = ""  # awaiting_user | authorizing | paid | failed | expired | cancelled | refunded
+    amount_krw: int = 0
+    supplier_order_id: str = ""
+    external_payment_id: str = ""
+    raw: dict[str, Any] = field(default_factory=dict)
+    error: str = ""
+
+
 @runtime_checkable
 class SupplierOrderPort(Protocol):
     supplier_code: str
@@ -54,6 +79,30 @@ class SupplierOrderPort(Protocol):
     def create_order(self, command: SupplierOrderCommand, simulation: dict[str, Any] | None = None) -> SupplierOrderResult: ...
     def cancel_order(self, supplier_order_id: str, reason: str) -> SupplierOrderResult: ...
     def get_tracking(self, supplier_order_id: str) -> TrackingResult: ...
+
+
+@runtime_checkable
+class SupplierPaymentPort(Protocol):
+    """Optional supplier payment capability.
+
+    Drivers that require a card-app/user authorization implement this separately
+    from SupplierOrderPort so order creation is never confused with payment completion.
+    """
+    supplier_code: str
+
+    def prepare_payment(
+        self,
+        command: SupplierOrderCommand,
+        *,
+        simulation: dict[str, Any] | None = None,
+    ) -> PaymentPreparationResult: ...
+
+    def get_payment_status(
+        self,
+        external_payment_id: str,
+        *,
+        supplier_order_id: str = "",
+    ) -> PaymentStatusResult: ...
 
 
 @dataclass(frozen=True)
