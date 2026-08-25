@@ -28,6 +28,7 @@ st.sidebar.caption("Seller OS · 하나의 운영 흐름")
 st.sidebar.page_link("app.py", label="Seller OS", icon="🎯")
 st.sidebar.page_link("pages/05_Order_Fulfillment_Monitor.py", label="주문·발주 관제센터", icon="🛰️")
 st.sidebar.page_link("pages/06_통합판매운영센터.py", label="통합 판매 운영센터", icon="🧭")
+st.sidebar.page_link("pages/07_커머스자동화제어센터.py", label="커머스 자동화 제어센터", icon="🤖")
 
 st.sidebar.markdown("### 보조 작업공간")
 st.sidebar.page_link("pages/30_상품소싱.py", label="통합 상품 소싱", icon="🔎")
