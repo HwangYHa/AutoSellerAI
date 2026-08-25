@@ -7,6 +7,7 @@ from app.db import Base, _get_engine, get_db
 import app.os.models  # noqa: F401  # register canonical tables on shared metadata
 import app.os.quality_models  # noqa: F401  # supplier commercial fact verification
 import app.os.model_events  # noqa: F401  # register persistence invariants
+import app.os.commerce_ops_models  # noqa: F401  # multi-channel operations extensions
 from app.os.models import (
     OSApprovalRequest,
     OSBackgroundTask,
