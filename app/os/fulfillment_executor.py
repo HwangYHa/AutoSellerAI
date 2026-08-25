@@ -12,12 +12,24 @@ from datetime import datetime
 
 from app.db import get_db
 from app.os.approvals import execute_idempotent, make_idempotency_key
+from app.os.commerce_ops_models import OSOrderOpsState
 from app.os.drivers import get_supplier_order_driver
 from app.os.models import OSApprovalRequest, OSFulfillment, OSSalesOrder, OSSalesOrderItem, OSSupplierOffer
 from app.os.ports import SupplierOrderCommand, SupplierPaymentPort
 from app.os.quality_models import OSOfferVerification
 from app.os.schema import ensure_os_schema
 from app.os.state import FULFILLMENT_STATES, ORDER_ITEM_STATES
+
+
+def _order_is_blocked(db, item_id: int) -> tuple[bool, str]:
+    state = db.query(OSOrderOpsState).filter_by(order_item_id=int(item_id)).first()
+    if not state:
+        return False, ""
+    if state.claim_blocked:
+        return True, state.hold_reason or "취소·반품·교환 클레임이 활성화되어 있습니다."
+    if state.shipment_hold:
+        return True, state.hold_reason or "출고 보류 상태입니다."
+    return False, ""
 
 
 def execute_supplier_order(approval_id: int, *, actor: str = "worker") -> dict:
@@ -50,6 +62,16 @@ def execute_supplier_order(approval_id: int, *, actor: str = "worker") -> dict:
         item = db.query(OSSalesOrderItem).filter_by(id=fulfillment.order_item_id).first()
         if not item:
             return {"ok": False, "error": "주문 품목을 찾을 수 없습니다."}
+        blocked, block_reason = _order_is_blocked(db, item.id)
+        if blocked:
+            return {
+                "ok": False,
+                "code": "ORDER_BLOCKED_BY_CLAIM_OR_HOLD",
+                "error": f"실제 발주 직전 안전검사에서 중단했습니다: {block_reason}",
+            }
+        if item.status in {"cancelled", "completed"}:
+            return {"ok": False, "code": "ORDER_NOT_FULFILLABLE", "error": f"현재 주문품목 상태에서는 발주할 수 없습니다: {item.status}"}
+
         order = db.query(OSSalesOrder).filter_by(id=item.order_id).first()
         offer = db.query(OSSupplierOffer).filter_by(id=fulfillment.supplier_offer_id).first() if fulfillment.supplier_offer_id else None
         if not order or not offer:
@@ -116,6 +138,16 @@ def execute_supplier_order(approval_id: int, *, actor: str = "worker") -> dict:
         fulfillment_id = int(fulfillment.id)
 
     def executor():
+        # Re-read the hold/claim state immediately before the first supplier side
+        # effect. This closes the race between approval/queueing and execution.
+        with get_db() as safety_db:
+            blocked_now, reason_now = _order_is_blocked(safety_db, command.order_item_id)
+            current_item = safety_db.query(OSSalesOrderItem).filter_by(id=command.order_item_id).first()
+            if blocked_now:
+                raise RuntimeError(f"ORDER_BLOCKED_BY_CLAIM_OR_HOLD: {reason_now}")
+            if not current_item or current_item.status in {"cancelled", "completed"}:
+                raise RuntimeError("ORDER_NOT_FULFILLABLE: 발주 직전 주문 상태가 변경되었습니다.")
+
         simulation = driver.simulate(command)
         if isinstance(driver, SupplierPaymentPort):
             from app.os.payment_orchestrator import prepare_payment
@@ -170,8 +202,6 @@ def execute_supplier_order(approval_id: int, *, actor: str = "worker") -> dict:
             if execution.get("ok"):
                 response = execution.get("response") or {}
                 if response.get("payment_pending"):
-                    # An issuer/card-app approval is still outstanding.  Do not lie to
-                    # downstream shipment automation by marking this order as ordered.
                     fulfillment.status = "ordering"
                     if response.get("supplier_order_id"):
                         fulfillment.supplier_order_id = str(response.get("supplier_order_id"))
