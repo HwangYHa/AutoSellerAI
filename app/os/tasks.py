@@ -25,6 +25,11 @@ TASK_TIMEOUT_SECONDS: dict[str, int] = {
     "catalog_sync": 3600,
     "order_sync": 5400,
     "fulfillment_cycle": 1800,
+    "claim_sync": 1800,
+    "inquiry_sync": 1800,
+    "settlement_sync": 3600,
+    "inventory_automation": 1800,
+    "payment_sync": 1800,
     "data_reconcile": 3600,
     "image_repair": 7200,
     "listing_publish": 1800,
@@ -47,7 +52,6 @@ def _loads(value: str) -> dict[str, Any]:
 
 
 def _with_task_meta(result: Any, **meta: Any) -> dict[str, Any]:
-    """Keep legacy result keys at the top level and reserve metadata under _task_meta."""
     if isinstance(result, dict):
         payload = dict(result)
     else:
@@ -60,8 +64,7 @@ def _with_task_meta(result: Any, **meta: Any) -> dict[str, Any]:
 
 
 def _redis() -> Redis:
-    settings = get_settings()
-    return Redis.from_url(settings.redis_url, socket_connect_timeout=3, socket_timeout=5)
+    return Redis.from_url(get_settings().redis_url, socket_connect_timeout=3, socket_timeout=5)
 
 
 def _queue(name: str) -> Queue:
@@ -112,22 +115,39 @@ def _task_callable(task_type: str) -> Callable[[dict[str, Any]], Any]:
             return run_fulfillment_cycle(limit=int(limit) if limit else None)
         return fulfillment_cycle
 
+    if task_type == "claim_sync":
+        from app.os.commerce_automation import sync_claims
+        return lambda payload: sync_claims(hours_back=max(1, int(payload.get("hours", 24))))
+
+    if task_type == "inquiry_sync":
+        from app.os.commerce_automation import sync_inquiries
+        return lambda payload: sync_inquiries()
+
+    if task_type == "settlement_sync":
+        from app.os.commerce_automation import sync_settlements
+        return lambda payload: sync_settlements(days=max(1, int(payload.get("days", 7))))
+
+    if task_type == "inventory_automation":
+        from app.os.commerce_automation import run_inventory_automation
+        return lambda payload: run_inventory_automation(confirmations_required=max(2, int(payload.get("confirmations", 2))))
+
+    if task_type == "payment_sync":
+        from app.os.payment_orchestrator import sync_payment_sessions
+        return lambda payload: sync_payment_sessions(limit=max(1, int(payload.get("limit", 100))))
+
     if task_type == "data_reconcile":
         def reconcile(payload: dict[str, Any]) -> Any:
             from app.services.data_graph import reconcile_data_graph
             from app.os.bridge import migrate_legacy_to_os
             return {
-                "legacy_graph": reconcile_data_graph(fetch_remote_identities=bool(payload.get("remote", False)),),
+                "legacy_graph": reconcile_data_graph(fetch_remote_identities=bool(payload.get("remote", False))),
                 "bridge": migrate_legacy_to_os(),
             }
         return reconcile
 
     if task_type == "image_repair":
         def image_repair(payload: dict[str, Any]) -> Any:
-            from app.services.image_maintenance import (
-                refresh_supplier_images_responsive,
-                repair_all_product_images_responsive,
-            )
+            from app.services.image_maintenance import refresh_supplier_images_responsive, repair_all_product_images_responsive
             include_marketplaces = bool(payload.get("include_marketplaces", True))
             if "limit" in payload and not include_marketplaces:
                 return refresh_supplier_images_responsive(limit=max(1, int(payload.get("limit", 300))))
@@ -171,7 +191,6 @@ def _persist_state(task_id: int, updater: Callable[[OSBackgroundTask], None]) ->
             updater(row)
             db.commit()
             return True
-
     return retry_sqlite_write(operation, attempts=6)
 
 
@@ -196,14 +215,9 @@ def run_task(task_id: int) -> dict[str, Any]:
         row.finished_at = None
         row.error = ""
         current = _loads(row.result_json)
-        row.result_json = _dumps(_with_task_meta(
-            current,
-            rq_job_id=rq_job_id,
-            worker_started_at=datetime.utcnow().isoformat(),
-        ))
+        row.result_json = _dumps(_with_task_meta(current, rq_job_id=rq_job_id, worker_started_at=datetime.utcnow().isoformat()))
 
     _persist_state(task_id, mark_running)
-
     try:
         result = _task_callable(task_type)(payload)
     except Exception as exc:
@@ -212,12 +226,7 @@ def run_task(task_id: int) -> dict[str, Any]:
             row.error = f"{type(exc).__name__}: {exc}"[:4000]
             row.finished_at = datetime.utcnow()
             current = _loads(row.result_json)
-            row.result_json = _dumps(_with_task_meta(
-                current,
-                rq_job_id=rq_job_id,
-                worker_finished_at=row.finished_at.isoformat(),
-            ))
-
+            row.result_json = _dumps(_with_task_meta(current, rq_job_id=rq_job_id, worker_finished_at=row.finished_at.isoformat()))
         _persist_state(task_id, mark_failed)
         raise
 
@@ -226,53 +235,27 @@ def run_task(task_id: int) -> dict[str, Any]:
         row.progress_pct = 100
         row.error = ""
         row.finished_at = datetime.utcnow()
-        row.result_json = _dumps(_with_task_meta(
-            result,
-            rq_job_id=rq_job_id,
-            worker_finished_at=row.finished_at.isoformat(),
-        ))
+        row.result_json = _dumps(_with_task_meta(result, rq_job_id=rq_job_id, worker_finished_at=row.finished_at.isoformat()))
 
     _persist_state(task_id, mark_succeeded)
     return {"ok": True, "result": result}
 
 
-def enqueue_task(
-    task_type: str,
-    payload: dict[str, Any] | None = None,
-    *,
-    queue_name: str = "sync",
-    dedupe_key: str = "",
-) -> dict[str, Any]:
-    ensure_os_schema()
-    payload = payload or {}
+def enqueue_task(task_type: str, payload: dict[str, Any] | None = None, *, queue_name: str = "sync", dedupe_key: str = "") -> dict[str, Any]:
+    ensure_os_schema(); payload = payload or {}
 
     def create_journal_row() -> dict[str, Any]:
         with get_db() as db:
             if dedupe_key:
-                existing = (
-                    db.query(OSBackgroundTask)
-                    .filter(
-                        OSBackgroundTask.task_type == task_type,
-                        OSBackgroundTask.dedupe_key == dedupe_key,
-                        OSBackgroundTask.status.in_(["queued", "running"]),
-                    )
-                    .order_by(OSBackgroundTask.id.desc())
-                    .first()
-                )
+                existing = db.query(OSBackgroundTask).filter(
+                    OSBackgroundTask.task_type == task_type,
+                    OSBackgroundTask.dedupe_key == dedupe_key,
+                    OSBackgroundTask.status.in_(["queued", "running"]),
+                ).order_by(OSBackgroundTask.id.desc()).first()
                 if existing:
                     return {"reused": True, "task_id": existing.id, "status": existing.status}
-            row = OSBackgroundTask(
-                task_key=uuid4().hex,
-                task_type=task_type,
-                queue_name=queue_name,
-                dedupe_key=dedupe_key,
-                status="queued",
-                payload_json=_dumps(payload),
-                result_json="{}",
-            )
-            db.add(row)
-            db.commit()
-            db.refresh(row)
+            row = OSBackgroundTask(task_key=uuid4().hex, task_type=task_type, queue_name=queue_name, dedupe_key=dedupe_key, status="queued", payload_json=_dumps(payload), result_json="{}")
+            db.add(row); db.commit(); db.refresh(row)
             return {"reused": False, "task_id": row.id, "status": row.status}
 
     journal = retry_sqlite_write(create_journal_row, attempts=6)
@@ -282,79 +265,34 @@ def enqueue_task(
 
     job_id = f"os-task-{task_id}"
     try:
-        redis = _redis()
-        redis.ping()
+        redis = _redis(); redis.ping()
         job = _queue(queue_name).enqueue(
-            "app.os.tasks.run_task",
-            task_id,
-            job_id=job_id,
-            job_timeout=_task_timeout(task_type),
-            result_ttl=RQ_RESULT_TTL_SECONDS,
-            failure_ttl=RQ_FAILURE_TTL_SECONDS,
+            "app.os.tasks.run_task", task_id, job_id=job_id,
+            job_timeout=_task_timeout(task_type), result_ttl=RQ_RESULT_TTL_SECONDS, failure_ttl=RQ_FAILURE_TTL_SECONDS,
         )
-
         def mark_enqueued(row: OSBackgroundTask) -> None:
             current = _loads(row.result_json)
-            row.result_json = _dumps(_with_task_meta(
-                current,
-                rq_job_id=job.id,
-                rq_timeout_seconds=_task_timeout(task_type),
-                rq_result_ttl_seconds=RQ_RESULT_TTL_SECONDS,
-                enqueued_at=datetime.utcnow().isoformat(),
-            ))
-
+            row.result_json = _dumps(_with_task_meta(current, rq_job_id=job.id, rq_timeout_seconds=_task_timeout(task_type), rq_result_ttl_seconds=RQ_RESULT_TTL_SECONDS, enqueued_at=datetime.utcnow().isoformat()))
         _persist_state(task_id, mark_enqueued)
         return {"ok": True, "task_id": task_id, "rq_job_id": job.id, "status": "queued", "reused": False}
     except Exception as exc:
         def mark_enqueue_failed(row: OSBackgroundTask) -> None:
-            row.status = "failed"
-            row.error = f"Redis/RQ enqueue 실패: {exc}"[:4000]
-            row.finished_at = datetime.utcnow()
-
+            row.status = "failed"; row.error = f"Redis/RQ enqueue 실패: {exc}"[:4000]; row.finished_at = datetime.utcnow()
         _persist_state(task_id, mark_enqueue_failed)
-        return {
-            "ok": False,
-            "task_id": task_id,
-            "status": "failed",
-            "error": f"백그라운드 작업 큐 연결 실패: {exc}",
-        }
+        return {"ok": False, "task_id": task_id, "status": "failed", "error": f"백그라운드 작업 큐 연결 실패: {exc}"}
 
 
 def get_task(task_id: int | None) -> dict[str, Any] | None:
-    if not task_id:
-        return None
+    if not task_id: return None
     ensure_os_schema()
     with get_db() as db:
         row = db.query(OSBackgroundTask).filter_by(id=int(task_id)).first()
-        if not row:
-            return None
-        return {
-            "id": row.id,
-            "task_type": row.task_type,
-            "queue_name": row.queue_name,
-            "status": row.status,
-            "progress_pct": row.progress_pct,
-            "result": _loads(row.result_json),
-            "error": row.error,
-            "created_at": row.created_at,
-            "started_at": row.started_at,
-            "finished_at": row.finished_at,
-        }
+        if not row: return None
+        return {"id": row.id, "task_type": row.task_type, "queue_name": row.queue_name, "status": row.status, "progress_pct": row.progress_pct, "result": _loads(row.result_json), "error": row.error, "created_at": row.created_at, "started_at": row.started_at, "finished_at": row.finished_at}
 
 
 def list_tasks(limit: int = 50) -> list[dict[str, Any]]:
     ensure_os_schema()
     with get_db() as db:
         rows = db.query(OSBackgroundTask).order_by(OSBackgroundTask.id.desc()).limit(max(1, int(limit))).all()
-        return [
-            {
-                "id": x.id,
-                "type": x.task_type,
-                "queue": x.queue_name,
-                "status": x.status,
-                "progress": x.progress_pct,
-                "error": x.error,
-                "created_at": x.created_at,
-            }
-            for x in rows
-        ]
+        return [{"id": x.id, "type": x.task_type, "queue": x.queue_name, "status": x.status, "progress": x.progress_pct, "error": x.error, "created_at": x.created_at} for x in rows]
