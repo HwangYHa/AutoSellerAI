@@ -1,8 +1,8 @@
 """PlayAuto-inspired commerce operations domain models.
 
 These tables add operational controls that sit above marketplace/supplier adapters:
-product matching rules, claims, per-order-item shipment/CS controls, inventory safety
-policies and reusable marketplace templates.
+product matching rules, claims, shipment controls, order work metadata, inventory
+safety policies and reusable marketplace templates.
 """
 from __future__ import annotations
 
@@ -34,9 +34,7 @@ class OSProductMatchRule(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
 
-    __table_args__ = (
-        UniqueConstraint("platform", "external_item_id", name="uq_os_match_rule_platform_item"),
-    )
+    __table_args__ = (UniqueConstraint("platform", "external_item_id", name="uq_os_match_rule_platform_item"),)
 
 
 class OSOrderClaim(Base):
@@ -47,16 +45,14 @@ class OSOrderClaim(Base):
     external_claim_id: Mapped[str] = mapped_column(String(220), index=True)
     external_order_id: Mapped[str] = mapped_column(String(220), default="", index=True)
     external_item_id: Mapped[str] = mapped_column(String(220), default="", index=True)
-    claim_type: Mapped[str] = mapped_column(String(30), index=True)  # cancel | return | exchange
+    claim_type: Mapped[str] = mapped_column(String(30), index=True)
     status: Mapped[str] = mapped_column(String(30), default="requested", index=True)
     reason: Mapped[str] = mapped_column(String(500), default="")
     raw_json: Mapped[str] = mapped_column(Text, default="{}")
     detected_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
 
-    __table_args__ = (
-        UniqueConstraint("platform", "external_claim_id", name="uq_os_claim_platform_external"),
-    )
+    __table_args__ = (UniqueConstraint("platform", "external_claim_id", name="uq_os_claim_platform_external"),)
 
 
 class OSOrderOpsState(Base):
@@ -70,6 +66,15 @@ class OSOrderOpsState(Base):
     delay_notified: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     claim_blocked: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     operator_note: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class OSOrderWorkMeta(Base):
+    __tablename__ = "os_order_work_meta"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    order_item_id: Mapped[int] = mapped_column(ForeignKey("os_sales_order_items.id", ondelete="CASCADE"), unique=True, index=True)
     user_tag: Mapped[str] = mapped_column(String(120), default="", index=True)
     owner: Mapped[str] = mapped_column(String(120), default="", index=True)
     priority: Mapped[int] = mapped_column(Integer, default=50, index=True)
