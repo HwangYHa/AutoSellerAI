@@ -11,5 +11,10 @@ from app.os.database import configure_database
 configure_database()
 
 from app.os.schema import ensure_os_schema  # noqa: E402
+from app.os.channel_template_runtime import install_channel_template_runtime  # noqa: E402
+
+# Marketplace create_product calls made through Seller OS receive the reusable
+# channel template at the final adapter boundary. Installation is idempotent.
+install_channel_template_runtime()
 
 __all__ = ["ensure_os_schema"]
