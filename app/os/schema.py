@@ -8,6 +8,7 @@ import app.os.models  # noqa: F401  # register canonical tables on shared metada
 import app.os.quality_models  # noqa: F401  # supplier commercial fact verification
 import app.os.model_events  # noqa: F401  # register persistence invariants
 import app.os.commerce_ops_models  # noqa: F401  # multi-channel operations extensions
+import app.os.commerce_automation_models  # noqa: F401  # claims/inquiries/settlement/scheduler/payment
 from app.os.models import (
     OSApprovalRequest,
     OSBackgroundTask,
