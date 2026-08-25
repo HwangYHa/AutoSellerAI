@@ -81,6 +81,22 @@ class Settings(BaseSettings):
     fulfillment_supplier_allowlist: str = ""
     fulfillment_max_items_per_cycle: int = 50
 
+    # 판매 운영 자동화
+    # 외부 판매중지/재개는 실제 판매에 영향을 주므로 기본 OFF. UI/환경설정에서 명시적으로 활성화한다.
+    inventory_auto_visibility_enabled: bool = False
+    inventory_low_stock_confirmations: int = 2
+    inventory_restock_confirmations: int = 2
+    inventory_restock_buffer: int = 1
+    inquiry_ai_draft_enabled: bool = True
+    inquiry_auto_answer_enabled: bool = False
+    inquiry_ai_max_chars: int = 1200
+    settlement_sync_days: int = 31
+    claim_sync_hours: int = 72
+    inquiry_sync_days: int = 7
+    # 공급처별 결제 방식 JSON 예: {"ownerclan":"balance","onchannel":"interactive_card"}
+    supplier_payment_modes_json: str = "{}"
+    payment_session_expire_minutes: int = 20
+
     # 네이버 쇼핑 검색 + 데이터랩
     naver_search_client_id: str = ""
     naver_search_client_secret: str = ""
