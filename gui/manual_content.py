@@ -1,171 +1,193 @@
-"""오토셀러AI Seller OS v2 사용자 매뉴얼."""
+"""AutoSellerAI Seller OS v3 final user manual."""
 from __future__ import annotations
 
 import streamlit as st
 
-from gui.help_center import PROCESS_STEPS
+
+def _step(title: str, body: str) -> None:
+    with st.container(border=True):
+        st.markdown(f"### {title}")
+        st.markdown(body)
 
 
 def render_manual() -> None:
-    st.markdown("# 📘 오토셀러 AI 사용자 매뉴얼")
-    st.caption("평소에는 Seller OS만 사용하고, 새 상품이 필요할 때 통합 상품 소싱, 연결 문제가 있을 때만 연동 설정을 사용합니다.")
+    st.markdown("# 📘 AutoSellerAI 최종 사용자 매뉴얼")
+    st.caption("상품 소싱부터 판매채널 등록, 주문·발주·결제, 송장, 클레임, 문의, 재고, 정산까지 한 흐름으로 운영합니다.")
 
     st.info(
-        "**핵심 규칙:** 연결 → 상품 확보 → 판매 준비 → 채널 등록 → 주문 → 발주/배송 → 정산 → 성장. "
-        "세부 기능을 따로 외우지 말고 이 8단계만 기억하세요."
+        "**가장 중요한 운영 원칙:** 정상 주문은 자동화가 처리하고, 사용자는 카드 승인·가격변동·품절·클레임·매칭 오류처럼 "
+        "사람 판단이 필요한 예외만 확인합니다."
     )
 
-    st.markdown("## 가장 많이 쓰는 화면")
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        with st.container(border=True):
-            st.markdown("### 📦 Seller OS")
-            st.write("상품·주문·배송·수익을 일상적으로 관리하는 기본 화면입니다.")
-            st.page_link("pages/00_AutoSeller_Main.py", label="Seller OS", use_container_width=True)
-    with c2:
-        with st.container(border=True):
-            st.markdown("### 🔎 통합 상품 소싱")
-            st.write("도매꾹·도매매·온채널·오너클랜을 한 번에 검색하고 비교합니다.")
-            st.page_link("pages/30_상품소싱.py", label="상품 소싱", use_container_width=True)
-    with c3:
-        with st.container(border=True):
-            st.markdown("### 🚀 원큐 자동화")
-            st.write("현재 상태를 진단하고 안전한 동기화를 실행한 뒤 다음 한 가지 작업을 안내합니다.")
-            st.page_link("pages/01_원큐_운영.py", label="원큐 자동화", use_container_width=True)
+    st.markdown("## 1. 최초 설치 및 최종 배포")
+    st.write("Windows PowerShell에서 프로젝트 루트로 이동한 뒤 아래 한 줄로 최종 배포합니다.")
+    st.code(
+        "cd G:\\Dev\\python-workspace\\AutoSellerAI\n"
+        "powershell -ExecutionPolicy Bypass -File .\\scripts\\deploy_local.ps1",
+        language="powershell",
+    )
+    st.write("배포가 완료되면 브라우저에서 `http://localhost:8501`에 접속합니다.")
+    st.warning("`.env`에는 실제 API 키가 있으므로 Git에 커밋하지 않습니다. `.env` 변경 후에는 서비스를 재기동하세요.")
 
-    st.markdown("## 8단계 표준 운영")
-    for no, title, desc, location in PROCESS_STEPS:
-        with st.container(border=True):
-            left, right = st.columns([0.7, 5.3])
-            left.markdown(f"### {no}")
-            with right:
+    st.markdown("## 2. 평소 사용할 화면")
+    cols = st.columns(4)
+    cards = [
+        ("🎯 Seller OS", "오늘 할 일, 상품, 주문·배송, 수익, 시스템 상태를 보는 기본 화면", "app.py"),
+        ("🛰️ 주문·발주 관제센터", "주문 → 공급처 → 결제 → 송장 → 판매채널 반영 상태를 추적", "pages/05_Order_Fulfillment_Monitor.py"),
+        ("🧭 통합 판매 운영센터", "CS메모, 태그, 출고보류, 클레임, 재고정책, 정산, 템플릿 관리", "pages/06_통합판매운영센터.py"),
+        ("🤖 커머스 자동화 제어센터", "클레임·문의·재고·정산·결제·스케줄러 자동화 제어", "pages/07_커머스자동화제어센터.py"),
+    ]
+    for col, (title, desc, path) in zip(cols, cards):
+        with col:
+            with st.container(border=True):
                 st.markdown(f"### {title}")
                 st.write(desc)
-                st.caption(f"📍 {location}")
+                st.page_link(path, label="열기", use_container_width=True)
 
-    st.markdown("## 1. 처음 실행")
-    with st.expander("프로그램 시작", expanded=True):
-        st.code(
-            "git switch main\n"
-            "git pull origin main\n"
-            "pip install -r requirements.txt\n"
-            "streamlit run gui/app.py",
-            language="bash",
-        )
-        st.write("브라우저에서 `http://localhost:8501`에 접속합니다.")
-        st.warning("`.env`를 수정했다면 Streamlit을 Ctrl+C로 완전히 종료한 뒤 다시 실행하세요.")
+    st.markdown("## 3. 처음부터 끝까지 전체 판매 프로세스")
+    _step("① API와 공급처 연결 확인", """
+- 쿠팡 / 스마트스토어 API 인증을 확인합니다.
+- 오너클랜·도매꾹·도매매·온채널 등 실제 사용하는 공급처 연결을 확인합니다.
+- 연결 오류가 있으면 상품등록·주문수집보다 먼저 해결합니다.
+- `Seller OS → 설정·자동화` 또는 각 연동 화면에서 상태를 확인합니다.
+""")
+    _step("② 상품 소싱", """
+- **통합 상품 소싱**에서 도매상품을 검색합니다.
+- 공급가, 배송비, 재고, MOQ, 옵션, 원산지, 이미지 품질을 비교합니다.
+- 판매가를 정할 때 플랫폼 수수료·공급처 배송비까지 포함해 실제 이익을 확인합니다.
+- 적합한 상품만 AutoSellerAI 상품으로 가져옵니다.
+""")
+    _step("③ 상품 콘텐츠·판매정보 준비", """
+- 상품명, 이미지, 상세이미지, 옵션, 원산지, 브랜드를 확인합니다.
+- 원본 자료가 부족한 경우에만 **콘텐츠 스튜디오**에서 상세페이지를 보완합니다.
+- 반복되는 배송비·반품비·판매조건은 **통합 판매 운영센터 → 판매 템플릿**에 저장합니다.
+- 템플릿은 쿠팡/스마트스토어 상품등록 payload에 적용됩니다.
+""")
+    _step("④ 쿠팡·스마트스토어 등록", """
+- Seller OS에서 등록할 상품과 판매채널을 선택합니다.
+- 쿠팡은 상품명 기반 카테고리 추천과 유효성 검사를 거칩니다.
+- 스마트스토어도 해당 채널 규칙에 맞게 별도 payload를 생성합니다.
+- 한 채널의 category ID를 다른 채널로 복사하지 않습니다.
+- 기존 마켓 상품을 가져와 다른 마켓에 복제 등록할 때도 카테고리와 옵션을 채널별로 다시 정규화합니다.
+""")
+    _step("⑤ 대량등록·대량수정", """
+- 대량 작업이 필요하면 커머스 자동화/대량도구에서 Excel/CSV 계약 형식을 사용합니다.
+- `product_id`, `sku`, 판매가, 옵션 JSON 등 식별 필드를 유지합니다.
+- 업로드 전에 변경 미리보기를 확인하고, 실제 외부 변경 작업은 중복실행 방지 장치를 거칩니다.
+""")
+    _step("⑥ 주문 자동수집", """
+- 쿠팡·스마트스토어 신규 주문은 스케줄러가 주기적으로 수집합니다.
+- 기본 운영에서는 1분 단위의 준실시간 수집을 사용합니다.
+- 수집된 주문은 내부 Product/Variant/SupplierOffer와 정확히 매칭합니다.
+- 자동매칭이 확실하지 않으면 발주하지 않고 `오늘 할 일` 또는 관제센터에 예외로 남깁니다.
+""")
+    _step("⑦ 취소·반품·교환 및 문의 동기화", """
+- 판매채널의 취소·반품·교환 요청을 자동수집합니다.
+- 활성 클레임이 있는 주문은 출고/공급처 발주 전에 HOLD 처리합니다.
+- 상품문의·구매자문의도 자동수집하고 답변 템플릿 또는 AI 초안을 사용할 수 있습니다.
+- AI 답변은 사실정보를 기반으로 검토하며, 외부 답변 전 안전한 실행 경로를 사용합니다.
+""")
+    _step("⑧ 발주 직전 검증", """
+실제 돈이 나가기 직전에 다음을 다시 확인합니다.
 
-    st.markdown("## 2. Seller OS 사용법")
-    with st.expander("📦 상품", expanded=True):
-        st.markdown(
-            """
-- 검색창 하나로 상품명·SKU·상품번호를 찾습니다.
-- 상태, 공급처, 판매채널, `조치 필요만` 필터로 목록을 줄입니다.
-- 카드에는 판매가·공급가·단순마진·이미지 수·채널 상태만 표시합니다.
-- 여러 상품을 선택하면 한 번에 쿠팡/스마트스토어 등록 또는 상태 변경이 가능합니다.
-- 이미지가 깨지거나 없으면 상단 **이미지 복구**를 사용합니다.
-- 상품 하나의 옵션·상세이미지·판매채널 번호가 필요할 때만 **상세**를 엽니다.
-            """
-        )
-        st.success("목표: 목록을 훑었을 때 ‘무슨 상품이고, 얼마에 팔며, 어디에 등록됐고, 문제가 있는지’를 바로 알 수 있어야 합니다.")
+- 주문이 취소되지 않았는지
+- 출고 HOLD/클레임이 없는지
+- 공급처 재고가 있는지
+- 옵션이 정확히 일치하는지
+- 공급가·배송비가 변하지 않았는지
+- 최소이익·최소마진 정책을 만족하는지
+- 같은 주문이 이미 발주되지 않았는지
+""")
+    _step("⑨ 공급처 발주와 결제", """
+- API·예치금·후불 등 자동결제가 가능한 공급처는 검증된 주문 Driver를 통해 진행합니다.
+- 카드사 앱 본인승인이 필요한 공급처는 **Payment Orchestrator**가 `사용자 승인 대기` 상태로 전환합니다.
+- 사용자는 휴대폰 카드사 앱에서 실제 결제승인만 수행합니다.
+- 카드번호·CVC·카드 비밀번호를 AutoSellerAI에 저장하지 않습니다.
+- 결제 완료가 확인된 뒤 공급처 주문번호를 저장하고 송장 추적으로 넘어갑니다.
+""")
+    _step("⑩ 송장 자동수집 및 판매채널 반영", """
+- 공급처 발주 후 택배사와 송장번호를 자동 감시합니다.
+- 송장이 확인되면 쿠팡/스마트스토어 배송처리 API에 자동 반영합니다.
+- `invoice_registered`와 idempotency 기록을 사용해 같은 송장을 중복 전송하지 않습니다.
+- 송장 지연 주문은 관제센터에서 별도 확인합니다.
+""")
+    _step("⑪ 안전재고·자동품절·재입고", """
+- 상품별 안전재고와 예약수량을 설정합니다.
+- 공급처 재고가 임계치 이하로 여러 번 확인되면 자동품절 후보가 됩니다.
+- 재고 미확인 상태를 0으로 간주해 무조건 품절시키지 않습니다.
+- 품절 조건이 확정되면 쿠팡/스마트스토어 판매상태를 변경하고, 재입고가 안정적으로 확인되면 자동 판매재개합니다.
+""")
+    _step("⑫ 정산·실제 순이익", """
+- 판매채널 정산 데이터를 자동수집합니다.
+- 매출에서 공급가, 플랫폼 수수료, 배송비, 광고비, 반품비, 세금 관련 비용을 반영합니다.
+- 예상값과 실제 정산값을 구분하고, 실제 데이터가 들어오면 정산 원장을 갱신합니다.
+- Seller OS → 수익 및 통합 판매 운영센터 → 정산에서 확인합니다.
+""")
 
-    with st.expander("🚚 주문 · 배송"):
-        st.markdown(
-            """
-1. **신규 주문 수집**을 실행합니다.
-2. 신규 주문의 상품·수량·수취인·주소를 확인합니다.
-3. 실제 공급처 발주는 금액이 발생하므로 확인 후 실행합니다.
-4. 공급처에서 실제 택배사와 송장이 나온 뒤 Seller OS에 입력합니다.
-5. **송장 등록**으로 쿠팡/스마트스토어 발송처리까지 연결합니다.
-            """
-        )
+    st.markdown("## 4. 하루 운영 순서")
+    st.markdown("""
+1. **Seller OS → 오늘 할 일**: 사람이 처리해야 할 예외가 있는지 확인  
+2. **주문·발주 관제센터**: 카드승인 대기, 발주실패, 송장지연 확인  
+3. **통합 판매 운영센터**: 취소·반품·교환, CS메모, 재고위험 확인  
+4. **커머스 자동화 제어센터**: 자동수집·스케줄러가 정상인지 확인  
+5. **Seller OS → 수익**: 실제 정산과 순이익 확인  
+6. 새 상품이 필요할 때만 **통합 상품 소싱** 사용
+""")
 
-    with st.expander("💰 수익"):
-        st.markdown(
-            """
-Seller OS의 수익 탭은 예상 매출이 아니라 실제 운영 결과를 봅니다.
+    st.markdown("## 5. 사용자가 직접 처리해야 하는 일")
+    st.markdown("""
+자동화 이후에도 다음은 사람 확인이 필요할 수 있습니다.
 
-- 매출
-- 공급 원가
-- 플랫폼 수수료
-- 실제 배송비
-- 광고비
-- 반품·교환 비용
-- 세금 추정치
-- 최종 순이익
-            """
-        )
+- 카드사 앱 본인승인
+- 공급가 급등으로 마진이 깨진 주문
+- 품절·옵션 불일치·주소 오류
+- 취소·반품·교환의 예외 판단
+- AI가 확신할 수 없는 상품/주문 매칭
+- 고객에게 법적·정책적 의미가 큰 답변
+""")
 
-    with st.expander("🔌 연동 · 시스템"):
-        st.write("평소에는 들어갈 필요가 없습니다. API 키 변경, 인증 오류, 판매채널 동기화 오류가 있을 때만 사용합니다.")
-        st.markdown(
-            """
-- **쿠팡·스마트스토어 연동:** 기존 판매상품 역동기화와 인증 진단
-- **오너클랜 연동:** JWT/GraphQL 판매사 API 진단
-- **도매꾹 연동:** Open API 연결 진단
-- **온채널 연동:** 로그인 세션 연결 진단
-            """
-        )
+    st.markdown("## 6. 자동화 상태와 스케줄")
+    st.markdown("""
+커머스 자동화 제어센터에서 다음 주기를 관리합니다.
 
-    st.markdown("## 3. 새 상품을 판매하기")
-    st.markdown(
-        """
-1. **통합 상품 소싱**에서 검색합니다.
-2. 공급처별 공급가·배송비·재고·MOQ를 비교합니다.
-3. 상품 하나를 AutoSellerAI로 가져옵니다.
-4. Seller OS 상품 탭에서 이미지, 상품명, 판매가, 마진을 확인합니다.
-5. 원본 상세자료가 부족할 때만 **이미지 · AI 상세페이지**를 사용합니다.
-6. 상품을 선택하고 판매채널을 지정해 등록합니다.
-7. 이후 주문은 Seller OS 주문·배송에서 처리합니다.
-        """
+- 주문 수집
+- 클레임 수집
+- 문의 수집
+- 재고/품절 자동화
+- 정산 수집
+- 결제상태 확인
+- 공급처 발주/송장 사이클
+
+주기를 너무 짧게 설정해 중복 작업을 만들지 않도록 RQ dedupe와 작업상태를 함께 확인합니다.
+""")
+
+    st.markdown("## 7. 오류가 쌓였을 때")
+    st.markdown("""
+- `오늘 할 일 → 오류 데이터 초기화`: 오류 메시지/실패 기록을 정리합니다. 실제 주문을 성공 처리하지 않습니다.
+- `설정·자동화 → 전체 데이터 초기화`: 개발/테스트 데이터를 완전히 다시 시작할 때만 사용합니다.
+- 전체 초기화는 실행 중 작업이 없어야 하며 확인문구 `RESET_ALL_DATA`를 직접 입력해야 합니다.
+- `.env`와 소스코드는 전체 데이터 초기화 대상이 아닙니다.
+""")
+
+    st.markdown("## 8. 배포 후 점검")
+    st.code(
+        "docker compose ps\n"
+        "docker compose exec -T redis redis-cli ping\n"
+        "docker compose logs --tail=100 seller-worker seller-dangerous-worker seller-scheduler",
+        language="powershell",
     )
+    st.write("정상이면 Seller OS, Seller API, Social API가 healthy이고 Redis는 `PONG`을 반환합니다.")
 
-    st.markdown("## 4. 이미지가 깨질 때")
-    st.markdown(
-        """
-쿠팡 API는 이미지 값을 완전한 웹 URL이 아니라 CDN 상대경로로 돌려주는 경우가 있습니다. Seller OS v2는 이를 저장 전에 절대 URL로 정규화하고, 기존 DB의 잘못된 이미지 문자열도 표시하지 않습니다.
-
-**복구 순서**
-1. Seller OS → 상품
-2. **이미지 복구** 클릭
-3. 기존 DB 이미지 경로 정리
-4. 쿠팡 상품 상세를 다시 동기화
-5. 복구할 수 없는 이미지는 깨진 아이콘 대신 `이미지 없음`으로 표시
-        """
-    )
-
-    st.markdown("## 5. 스마트스토어 `Invalid salt`가 뜰 때")
-    st.markdown(
-        """
-`NAVER_CLIENT_ID / NAVER_CLIENT_SECRET`은 **네이버 Commerce API 센터에서 발급된 한 쌍**이어야 합니다.
-검색 API의 `NAVER_SEARCH_CLIENT_ID / NAVER_SEARCH_CLIENT_SECRET`과 섞으면 안 됩니다.
-
-Commerce API Client Secret은 `$2a$...` 형태의 bcrypt salt입니다. 연동 화면에서 형식 검사를 통과한 뒤 동기화를 실행하세요.
-        """
-    )
-
-    st.markdown("## 6. 기능을 어디서 찾아야 하나")
+    st.markdown("## 9. 문제 발생 시 우선 확인")
     rows = [
-        ["상품을 찾는다", "통합 상품 소싱"],
-        ["상품을 수정·선택·등록한다", "Seller OS → 상품"],
-        ["이미지를 보완한다", "Seller OS → 상품 → 이미지 복구 / 이미지·AI 상세페이지"],
-        ["주문을 받는다", "Seller OS → 주문·배송"],
-        ["송장을 넣는다", "Seller OS → 주문·배송"],
-        ["실제 수익을 본다", "Seller OS → 수익"],
-        ["API 연결 문제를 고친다", "연동 설정"],
-        ["다음에 뭘 해야 할지 모르겠다", "원큐 자동화"],
+        ["주문이 안 들어옴", "판매채널 인증 → scheduler → order_sync 작업 상태"],
+        ["발주가 안 됨", "상품/옵션 매칭 → HOLD/클레임 → 공급처 Driver → 마진정책"],
+        ["카드 결제가 멈춤", "Payment Orchestrator의 사용자 승인 대기 상태와 카드사 앱"],
+        ["송장이 안 올라감", "공급처 tracking → 택배사 코드 → marketplace tracking 작업"],
+        ["상품이 품절됨", "공급처 재고 → 안전재고/예약수량 → 자동품절 상태"],
+        ["문의 답변 실패", "문의 수집 상태 → 템플릿/AI 초안 → 판매채널 인증"],
+        ["정산이 안 맞음", "판매채널 정산 수집 → 실제/예상 구분 → 공급가/수수료/배송비"],
     ]
-    st.dataframe(rows, column_config={0: "하려는 일", 1: "사용할 화면"}, hide_index=True, use_container_width=True)
+    st.dataframe(rows, column_config={0: "증상", 1: "확인 순서"}, hide_index=True, use_container_width=True)
 
-    st.markdown("## 7. 하루 운영 순서")
-    st.markdown(
-        """
-**1) Seller OS → 주문·배송:** 신규 주문과 송장 대기 확인  
-**2) Seller OS → 상품:** 조치 필요 상품만 확인  
-**3) 필요할 때만 통합 상품 소싱:** 새 판매 후보 확보  
-**4) Seller OS → 수익:** 실제 순이익 확인  
-**5) 선택적으로 스레드 판매/수익 학습:** 수익성이 확인된 상품 중심으로 마케팅
-        """
-    )
-
-    st.success("운영 기준: 평소에는 Seller OS 하나로 끝내고, 필요한 경우에만 소싱·연동·AI 화면으로 빠져나갑니다.")
+    st.success("최종 운영 목표: 모든 주문을 사람이 확인하는 것이 아니라, 시스템이 정상건을 처리하고 사용자는 예외만 판단합니다.")
