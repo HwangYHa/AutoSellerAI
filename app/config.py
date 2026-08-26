@@ -1,4 +1,8 @@
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+_IMAGE_MODELS = {"gpt-image-2", "gpt-image-1.5", "gpt-image-1-mini"}
 
 
 class Settings(BaseSettings):
@@ -107,18 +111,27 @@ class Settings(BaseSettings):
     claude_model_light: str = "claude-haiku-4-5-20251001"
     claude_model_heavy: str = "claude-sonnet-4-6"
 
-    # OpenAI / AI 이미지 상세페이지
+    # OpenAI / AI 이미지 상세페이지 · 썸네일
     openai_api_key: str = ""
     image_ai_enabled: bool = False
     image_ai_auto_generate: bool = False
     image_ai_provider: str = "openai"
-    image_ai_model: str = "gpt-image-1"
+    image_ai_model: str = "gpt-image-2"
     image_ai_size: str = "1024x1536"
     image_ai_quality: str = "medium"
     image_ai_detail_count: int = 3
+    image_thumbnail_size: str = "1024x1024"
+    image_thumbnail_quality: str = "medium"
     image_source_page_fetch: bool = True
     image_output_dir: str = "data/generated"
     image_public_base_url: str = ""
+
+    @field_validator("image_ai_model", mode="before")
+    @classmethod
+    def normalize_image_model(cls, value):
+        """이미지 endpoint에 텍스트 GPT 모델이 전달되는 사고를 차단한다."""
+        model = str(value or "").strip()
+        return model if model in _IMAGE_MODELS else "gpt-image-2"
 
     # 텔레그램 알림
     telegram_bot_token: str = ""
