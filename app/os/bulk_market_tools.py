@@ -3,6 +3,10 @@
 Bulk operations mutate only local product data. Cross-market cloning first creates a
 local reviewable Product, bridges it into Seller OS, then creates a normal listing
 approval request; it never publishes directly.
+
+Marketplace category identifiers are intentionally NOT copied across marketplaces.
+Coupang displayCategoryCode and Naver leafCategoryId belong to unrelated taxonomies;
+reusing one as the other can publish a product into a completely wrong category.
 """
 from __future__ import annotations
 
@@ -135,6 +139,66 @@ def apply_bulk_product_xlsx(data: bytes, *, allow_create: bool = True) -> dict[s
     return stats
 
 
+def _unique_text(values: list[Any], *, limit: int = 200) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _coupang_options(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Normalize Coupang item attributes into the local option-group shape.
+
+    Coupang exposes attributes per vendor item.  We preserve the distinct values per
+    attribute group.  The target marketplace will rebuild its own combinations; no
+    source vendorItemId/category identifiers are reused.
+    """
+    groups: dict[str, list[str]] = {}
+    for item in items:
+        for attr in item.get("attributes") or []:
+            if not isinstance(attr, dict):
+                continue
+            name = str(attr.get("attributeTypeName") or attr.get("name") or "").strip()
+            value = str(attr.get("attributeValueName") or attr.get("value") or "").strip()
+            if not name or not value:
+                continue
+            groups.setdefault(name, []).append(value)
+    return [
+        {"name": name, "values": _unique_text(values)}
+        for name, values in groups.items()
+        if _unique_text(values)
+    ][:2]
+
+
+def _naver_options(origin: dict[str, Any]) -> list[dict[str, Any]]:
+    detail = origin.get("detailAttribute") or {}
+    option_info = detail.get("optionInfo") or {}
+    group_names = option_info.get("optionCombinationGroupNames") or {}
+    combinations = option_info.get("optionCombinations") or []
+    if not isinstance(group_names, dict) or not isinstance(combinations, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for idx in (1, 2):
+        group_name = str(group_names.get(f"optionGroupName{idx}") or "").strip()
+        if not group_name:
+            continue
+        values = _unique_text([
+            row.get(f"optionName{idx}")
+            for row in combinations
+            if isinstance(row, dict) and row.get(f"optionName{idx}")
+        ])
+        if values:
+            result.append({"name": group_name, "values": values})
+    return result
+
+
 def _extract_remote_product(platform: str, external_product_id: str, raw: dict[str, Any]) -> dict[str, Any]:
     platform = str(platform).lower()
     if platform == "coupang":
@@ -150,12 +214,15 @@ def _extract_remote_product(platform: str, external_product_id: str, raw: dict[s
         return {
             "name": str(raw.get("sellerProductName") or raw.get("displayProductName") or first.get("itemName") or ""),
             "sell_price": float(first.get("salePrice") or first.get("originalPrice") or 0),
-            "category": str(raw.get("displayCategoryCode") or ""),
+            # Never forward a Coupang displayCategoryCode to Naver.  Keep the source
+            # code only as audit metadata and let the target resolver/template choose.
+            "category": "",
+            "source_category_id": str(raw.get("displayCategoryCode") or ""),
             "brand": str(raw.get("brand") or ""),
             "origin": "",
             "images": images,
             "detail_images": [],
-            "options": [],
+            "options": _coupang_options(items if isinstance(items, list) else []),
             "detail_html": detail_html,
         }
     if platform == "smartstore":
@@ -168,12 +235,14 @@ def _extract_remote_product(platform: str, external_product_id: str, raw: dict[s
         return {
             "name": str(origin.get("name") or ""),
             "sell_price": float(origin.get("salePrice") or 0),
-            "category": str(origin.get("leafCategoryId") or ""),
+            # Naver leafCategoryId must never be interpreted as Coupang category ID.
+            "category": "",
+            "source_category_id": str(origin.get("leafCategoryId") or ""),
             "brand": str(search.get("brandName") or search.get("manufacturerName") or ""),
             "origin": str(((detail_attr.get("originAreaInfo") or {}).get("content")) or ""),
             "images": ([rep] if rep else []) + optional,
             "detail_images": [],
-            "options": [],
+            "options": _naver_options(origin if isinstance(origin, dict) else {}),
             "detail_html": str(origin.get("detailContent") or ""),
         }
     raise ValueError(f"지원하지 않는 원본 판매채널: {platform}")
@@ -223,6 +292,20 @@ def stage_marketplace_clone(
                 status="ready",
             )
             db.add(p); db.commit(); db.refresh(p)
+        else:
+            # Re-stage refreshes reviewable marketplace facts while preserving no
+            # supplier assumption.  This prevents stale source listing data.
+            p.name = name
+            p.sell_price = sell_price
+            p.category = normalized["category"]
+            p.brand = normalized["brand"]
+            p.origin = normalized["origin"]
+            p.images = json.dumps(normalized["images"], ensure_ascii=False)
+            p.detail_images = json.dumps(normalized["detail_images"], ensure_ascii=False)
+            p.options = json.dumps(normalized["options"], ensure_ascii=False)
+            p.detail_html = normalized["detail_html"]
+            p.status = "ready"
+            db.commit()
         legacy_id = int(p.id)
     migrate_legacy_to_os()
     with get_db() as db:
@@ -238,6 +321,12 @@ def stage_marketplace_clone(
         "sku": sku,
         "source_platform": source_platform,
         "target_platform": target_platform,
+        "source_category_id": normalized.get("source_category_id", ""),
+        "preserved_option_groups": len(normalized.get("options") or []),
         "approval": approval,
-        "warning": "원본 마켓 정보에는 공급처/공급가가 없으므로 자동발주용 SupplierOffer는 별도로 연결·검증해야 합니다.",
+        "warning": (
+            "원본 마켓의 카테고리 ID는 대상 마켓에 재사용하지 않습니다. 대상 마켓 카테고리는 "
+            "상품명/템플릿/대상 API 기준으로 다시 결정됩니다. 또한 원본 마켓 정보에는 공급처/공급가가 "
+            "없으므로 자동발주용 SupplierOffer는 별도로 연결·검증해야 합니다."
+        ),
     }
