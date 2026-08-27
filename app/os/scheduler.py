@@ -1,4 +1,9 @@
-"""Seller OS recurring scheduler with GUI-configurable database rules."""
+"""Seller OS recurring scheduler with GUI-configurable database rules.
+
+Rules support both interval scheduling and explicit clock slots such as
+09:00, 13:00, 18:00. Schedule metadata is stored inside payload_json under
+`_schedule` so existing databases require no destructive migration.
+"""
 from __future__ import annotations
 
 import json
@@ -6,6 +11,7 @@ import logging
 import os
 import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from redis import Redis
 
@@ -18,6 +24,7 @@ from app.os.tasks import enqueue_task
 
 logger = logging.getLogger(__name__)
 MAINTENANCE_RESET_KEY = "seller-os:maintenance:reset"
+SCHEDULE_META_KEY = "_schedule"
 
 DEFAULT_JOBS = {
     "order_sync": {"default_minutes": 1, "payload": {"hours": 24}, "queue": "sync", "description": "쿠팡/스마트스토어 신규 주문 수집"},
@@ -30,9 +37,6 @@ DEFAULT_JOBS = {
     "catalog_sync": {"default_minutes": 60, "payload": {}, "queue": "sync", "description": "판매상품 동기화"},
     "data_reconcile": {"default_minutes": 30, "payload": {"remote": False}, "queue": "sync", "description": "데이터 관계 정합성 복구"},
 }
-
-# Backward-compatible public name used by existing tests and integrations. Runtime
-# scheduling is DB-driven; this map is only the immutable seed/default contract.
 SAFE_JOBS = DEFAULT_JOBS
 
 
@@ -48,8 +52,46 @@ def _bucket(interval_minutes: int, now: float | None = None) -> int:
     return int((now or time.time()) // (max(1, interval_minutes) * 60))
 
 
+def _normalize_clock(value: str) -> str:
+    text = str(value or "").strip()
+    parts = text.split(":")
+    if len(parts) != 2:
+        raise ValueError(f"잘못된 실행시각: {text}")
+    hour, minute = int(parts[0]), int(parts[1])
+    if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+        raise ValueError(f"잘못된 실행시각: {text}")
+    return f"{hour:02d}:{minute:02d}"
+
+
+def normalize_schedule_meta(value: object) -> dict:
+    """Validate GUI schedule metadata and return a canonical shape."""
+    if not isinstance(value, dict):
+        return {"mode": "interval"}
+    mode = str(value.get("mode") or "interval").strip().lower()
+    if mode != "times":
+        return {"mode": "interval"}
+    timezone_name = str(value.get("timezone") or "Asia/Seoul").strip()
+    try:
+        ZoneInfo(timezone_name)
+    except Exception as exc:
+        raise ValueError(f"지원하지 않는 타임존: {timezone_name}") from exc
+    raw_times = value.get("at") or []
+    if isinstance(raw_times, str):
+        raw_times = [x.strip() for x in raw_times.replace(";", ",").split(",") if x.strip()]
+    times = sorted({_normalize_clock(str(x)) for x in raw_times})
+    if not times:
+        raise ValueError("시간지정 스케줄은 실행시각이 1개 이상 필요합니다.")
+    weekdays_raw = value.get("weekdays")
+    if weekdays_raw in (None, "", []):
+        weekdays = list(range(7))
+    else:
+        weekdays = sorted({int(x) for x in weekdays_raw if 0 <= int(x) <= 6})
+        if not weekdays:
+            raise ValueError("weekdays는 0(월)~6(일) 중 1개 이상이어야 합니다.")
+    return {"mode": "times", "timezone": timezone_name, "at": times, "weekdays": weekdays}
+
+
 def ensure_default_scheduler_rules() -> None:
-    """Seed defaults once; user-edited DB rules remain authoritative afterwards."""
     ensure_os_schema()
     with get_db() as db:
         existing = {x.task_type for x in db.query(OSSchedulerRule).all()}
@@ -82,6 +124,11 @@ def _job_rules() -> list[dict]:
                     payload = {}
             except Exception:
                 payload = {}
+            try:
+                schedule = normalize_schedule_meta(payload.get(SCHEDULE_META_KEY))
+            except ValueError as exc:
+                logger.error("invalid scheduler rule task=%s: %s", row.task_type, exc)
+                schedule = {"mode": "invalid", "error": str(exc)}
             result.append({
                 "id": row.id,
                 "task_type": row.task_type,
@@ -89,8 +136,32 @@ def _job_rules() -> list[dict]:
                 "interval_minutes": max(1, int(row.interval_minutes or 1)),
                 "queue": row.queue_name or "sync",
                 "payload": payload,
+                "schedule": schedule,
             })
         return result
+
+
+def _due_slot(spec: dict, timestamp: float) -> str | None:
+    schedule = spec.get("schedule") or {"mode": "interval"}
+    if schedule.get("mode") == "invalid":
+        return None
+    if schedule.get("mode") != "times":
+        return f"interval:{_bucket(int(spec['interval_minutes']), timestamp)}"
+
+    tz = ZoneInfo(str(schedule.get("timezone") or "Asia/Seoul"))
+    local = datetime.fromtimestamp(timestamp, tz)
+    if local.weekday() not in set(schedule.get("weekdays") or range(7)):
+        return None
+    clock = local.strftime("%H:%M")
+    if clock not in set(schedule.get("at") or []):
+        return None
+    return f"clock:{local.strftime('%Y%m%d')}:{clock}"
+
+
+def _task_payload(payload: dict) -> dict:
+    cleaned = dict(payload or {})
+    cleaned.pop(SCHEDULE_META_KEY, None)
+    return cleaned
 
 
 def schedule_due_jobs(redis: Redis | None = None, *, now: float | None = None) -> list[dict]:
@@ -104,17 +175,20 @@ def schedule_due_jobs(redis: Redis | None = None, *, now: float | None = None) -
     for spec in _job_rules():
         if not spec["enabled"]:
             continue
+        slot = _due_slot(spec, timestamp)
+        if not slot:
+            continue
         task_type = spec["task_type"]
-        interval = spec["interval_minutes"]
-        bucket = _bucket(interval, timestamp)
-        marker = f"seller-os:schedule:{task_type}:{bucket}"
-        claimed = redis.set(marker, "1", nx=True, ex=max(120, interval * 60 * 2))
+        marker = f"seller-os:schedule:{task_type}:{slot}"
+        claimed = redis.set(marker, "1", nx=True, ex=172800)
         if not claimed:
             continue
         result = enqueue_task(
             task_type,
-            dict(spec["payload"]),
+            _task_payload(dict(spec["payload"])),
             queue_name=str(spec["queue"]),
+            # Keep one logical scheduler task of each type running at once. The slot
+            # marker separately prevents duplicate enqueue within the same minute.
             dedupe_key=f"scheduled:{task_type}",
         )
         if result.get("ok"):
@@ -123,7 +197,7 @@ def schedule_due_jobs(redis: Redis | None = None, *, now: float | None = None) -
                 if row:
                     row.last_enqueued_at = datetime.utcnow()
                     db.commit()
-        results.append({"task_type": task_type, "interval_minutes": interval, **result})
+        results.append({"task_type": task_type, "slot": slot, **result})
     return results
 
 
@@ -149,7 +223,7 @@ def run_forever() -> None:
                     logger.warning("reconciled failed RQ jobs count=%s ids=%s", recovery.get("failed"), recovery.get("failed_task_ids"))
                 next_recovery_at = now_mono + 60.0
             for row in schedule_due_jobs(redis):
-                logger.info("scheduled %s task_id=%s ok=%s", row["task_type"], row.get("task_id"), row.get("ok"))
+                logger.info("scheduled %s slot=%s task_id=%s ok=%s", row["task_type"], row.get("slot"), row.get("task_id"), row.get("ok"))
         except Exception:
             logger.exception("Seller OS scheduler iteration failed")
         time.sleep(30)
