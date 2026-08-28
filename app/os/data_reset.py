@@ -19,6 +19,7 @@ from app.config import get_settings
 from app.db import _get_engine, get_db
 from app.os.models import OSAuditEvent, OSBackgroundTask, OSFulfillment, OSSalesOrderItem
 from app.os.schema import ensure_os_schema
+from app.os.sqlite_resilience import run_with_sqlite_lock_retry
 
 
 FULL_RESET_CONFIRMATION = "RESET_ALL_DATA"
@@ -28,17 +29,13 @@ def _redis() -> Redis:
     return Redis.from_url(get_settings().redis_url, socket_connect_timeout=3, socket_timeout=5)
 
 
-def clear_work_queue_errors(*, actor: str = "seller") -> dict[str, Any]:
-    """Clear error *display/history* data without pretending business work succeeded.
+def _clear_work_queue_errors_once(*, actor: str) -> dict[str, Any]:
+    """Run one atomic clear attempt in a fresh transaction.
 
-    - failed/orphaned/cancelled background task journals are removed;
-    - order-item exception codes are cleared but the item's exception status remains;
-    - fulfillment failure code/message are cleared but failed status remains.
-
-    This keeps the operational truth intact while allowing the operator to clear the
-    error cards shown in '오늘 할 일'.
+    If SQLite reports a transient lock, closing this session rolls the entire
+    attempt back before the caller retries. That keeps the audit row and the data
+    cleanup in the same atomic commit.
     """
-    ensure_os_schema()
     with get_db() as db:
         failed_tasks = (
             db.query(OSBackgroundTask)
@@ -90,6 +87,22 @@ def clear_work_queue_errors(*, actor: str = "seller") -> dict[str, Any]:
         "fulfillment_errors": fulfillment_count,
         "total": task_count + item_count + fulfillment_count,
     }
+
+
+def clear_work_queue_errors(*, actor: str = "seller") -> dict[str, Any]:
+    """Clear error display/history data while preserving operational truth.
+
+    SQLite has one writer. UI/API/background writes can briefly overlap, so the
+    complete atomic cleanup is retried only when SQLite reports a lock/busy error.
+    Non-lock database failures are never hidden or retried.
+    """
+    ensure_os_schema()
+    return run_with_sqlite_lock_retry(
+        lambda: _clear_work_queue_errors_once(actor=actor),
+        attempts=6,
+        initial_delay_seconds=0.10,
+        max_delay_seconds=1.50,
+    )
 
 
 def get_full_reset_preview() -> dict[str, Any]:
