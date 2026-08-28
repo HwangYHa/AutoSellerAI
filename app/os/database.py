@@ -6,45 +6,24 @@ the same SQLAlchemy engine so there is one source of truth during migration.
 """
 from __future__ import annotations
 
-import time
-
-from sqlalchemy import create_engine, event
-from sqlalchemy.exc import OperationalError
+from sqlalchemy import create_engine
 
 import app.db as legacy_db
 from app.config import get_settings
+from app.sqlite_runtime import ensure_sqlite_wal
 
 
 _configured = False
 _SQLITE_BUSY_TIMEOUT_MS = 30_000
 
 
-def _is_locked(exc: BaseException) -> bool:
-    message = str(exc).lower()
-    return "database is locked" in message or "database table is locked" in message or "database schema is locked" in message
-
-
-def _enable_sqlite_wal(engine) -> None:
-    """Enable persistent WAL mode without making every DB connection change journals.
-
-    journal_mode is a database-level setting and can itself require a lock. Do it
-    once during bootstrap with a short bounded retry. Failure is non-fatal because
-    busy_timeout still protects ordinary local writes and the next process start
-    can retry WAL activation.
-    """
-    for attempt in range(5):
-        try:
-            with engine.connect() as conn:
-                conn.exec_driver_sql(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
-                conn.exec_driver_sql("PRAGMA journal_mode=WAL")
-            return
-        except OperationalError as exc:
-            if not _is_locked(exc) or attempt == 4:
-                return
-            time.sleep(0.10 * (2 ** attempt))
-
-
 def configure_database() -> None:
+    """Configure the shared engine without duplicating SQLite connection hooks.
+
+    ``app.sqlite_runtime`` owns all connection-local pragmas globally. This module
+    only selects/reuses the engine and performs the database-wide WAL activation
+    once. Keeping those responsibilities separate avoids journal-mode lock races.
+    """
     global _configured
     if _configured:
         return
@@ -64,24 +43,12 @@ def configure_database() -> None:
 
     engine = legacy_db._get_engine()
     if engine.dialect.name == "sqlite":
-        # Apply connection-local pragmas to every newly checked-out DBAPI handle.
-        # WAL is deliberately NOT changed here: journal_mode is database-wide and
-        # attempting to change it on each connection can create more contention.
-        @event.listens_for(engine, "connect")
-        def _sqlite_pragmas(dbapi_connection, connection_record):  # noqa: ARG001
-            cursor = dbapi_connection.cursor()
-            try:
-                cursor.execute("PRAGMA foreign_keys=ON")
-                cursor.execute("PRAGMA synchronous=NORMAL")
-                cursor.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
-            finally:
-                cursor.close()
-
-        # The legacy engine may have been created before Seller OS was imported.
-        # Dispose idle pooled handles so subsequent connections consistently receive
-        # the pragmas above. configure_database() runs before Seller OS sessions.
+        # Drop any idle handles created before OS bootstrap, then enable WAL under
+        # the same cross-process writer mutex used by ORM transactions. The runtime
+        # function remembers successful initialization per Engine, so repeated
+        # configure calls do not execute PRAGMA journal_mode again.
         engine.dispose()
-        _enable_sqlite_wal(engine)
+        ensure_sqlite_wal(engine)
 
     _configured = True
 
