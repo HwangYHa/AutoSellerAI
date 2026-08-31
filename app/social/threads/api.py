@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import desc, select
 
@@ -29,11 +30,12 @@ from app.social.threads.auth import (
     refresh_stored_credential,
 )
 from app.social.threads.client import ThreadsClient, ThreadsConfig, verify_webhook_signature
-from app.social.threads.content_engine import generate_threads_content
 from app.social.threads.growth_models import OrderAttribution, ScheduledSocialPost, SocialContentDraft, TrackingLink
+from app.social.threads.media import MEDIA_ROUTE, ensure_threads_media_directory
 from app.social.threads.models import ThreadsAutomationRule, ThreadsComment, ThreadsPost
 from app.social.threads.tasks import enqueue_webhook_event
 from app.social.threads.tracking import attribute_recent_orders, attribution_summary, create_tracking_link, record_click
+from app.social.threads.zalpa_content import generate_threads_content
 
 
 class PublishRequest(BaseModel):
@@ -62,6 +64,7 @@ class ContentGenerateRequest(BaseModel):
     count: int = Field(default=3, ge=1, le=5)
     target_platform: str = "smartstore"
     target_url: str = ""
+    tone: str = "zalpa"
 
 
 class TrackingLinkRequest(BaseModel):
@@ -86,7 +89,9 @@ class ScheduleRequest(BaseModel):
     carousel_items: list[dict[str, str]] = Field(default_factory=list)
 
 
-app = FastAPI(title="AutoSellerAI Social Commerce API", version="0.3.0")
+app = FastAPI(title="AutoSellerAI Social Commerce API", version="0.4.0")
+_threads_media_dir = ensure_threads_media_directory()
+app.mount(MEDIA_ROUTE, StaticFiles(directory=str(_threads_media_dir)), name="threads-media")
 
 
 @app.on_event("startup")
@@ -237,7 +242,7 @@ def generate_content(body: ContentGenerateRequest) -> dict[str, Any]:
             "brand": product.brand, "origin": product.origin, "material": product.material,
             "sell_price": product.sell_price,
         }
-    variants = generate_threads_content(context, body.angle, body.cta_keyword, body.count)
+    variants = generate_threads_content(context, body.angle, body.cta_keyword, body.count, tone=body.tone)
     ids: list[int] = []
     with get_db() as db:
         for variant in variants:
