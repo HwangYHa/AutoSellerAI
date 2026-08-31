@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -93,15 +93,26 @@ class StableDiffusionWebUIClient:
             raise StableDiffusionWebUIError("txt2img 응답에 images 배열이 없습니다.")
         return data
 
+    @staticmethod
+    def _optional(fetcher: Callable[[], Any], fallback: Any) -> Any:
+        try:
+            return fetcher()
+        except StableDiffusionWebUIError:
+            # A1111 versions differ slightly in discovery endpoints.  Generation
+            # should remain usable when an optional catalog endpoint is absent.
+            return fallback
+
     def capabilities(self) -> WebUICapabilities:
         try:
+            # /options is the minimum viable health check.  If this fails there is
+            # no usable A1111 API behind the configured URL.
             options = self.options()
-            samplers = self.samplers()
-            schedulers = self.schedulers()
-            upscalers = self.upscalers()
-            checkpoints = self.checkpoints()
-            scripts = self.scripts()
-            script_names = scripts.get("txt2img", [])
+            samplers = self._optional(self.samplers, [])
+            schedulers = self._optional(self.schedulers, [])
+            upscalers = self._optional(self.upscalers, [])
+            checkpoints = self._optional(self.checkpoints, [])
+            scripts = self._optional(self.scripts, {"txt2img": [], "img2img": []})
+            script_names = scripts.get("txt2img", []) if isinstance(scripts, dict) else []
             adetailer = any("adetailer" in name.lower() or "after detailer" in name.lower() for name in script_names)
             return WebUICapabilities(
                 ok=True,
