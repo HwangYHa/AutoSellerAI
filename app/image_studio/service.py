@@ -5,7 +5,7 @@ import os
 from typing import Any
 
 from redis import Redis
-from rq import Queue
+from rq import Queue, Worker
 from sqlalchemy import desc, select
 
 from app.db import get_db
@@ -17,6 +17,41 @@ from app.sqlite_runtime import retry_sqlite_write
 
 def _redis() -> Redis:
     return Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"))
+
+
+def get_image_queue_status() -> dict[str, Any]:
+    """Return a small, failure-safe runtime snapshot for the Streamlit studio."""
+    try:
+        connection = _redis()
+        connection.ping()
+        queue = Queue("image", connection=connection)
+        workers = Worker.all(queue=queue)
+        worker_rows = []
+        for worker in workers:
+            state = getattr(worker, "state", "unknown")
+            state_value = getattr(state, "value", state)
+            worker_rows.append(
+                {
+                    "name": str(getattr(worker, "name", "") or ""),
+                    "state": str(state_value or "unknown"),
+                    "last_heartbeat": getattr(worker, "last_heartbeat", None),
+                }
+            )
+        return {
+            "ok": True,
+            "queued": int(queue.count),
+            "workers": len(worker_rows),
+            "worker_rows": worker_rows,
+            "error": "",
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "queued": 0,
+            "workers": 0,
+            "worker_rows": [],
+            "error": str(exc),
+        }
 
 
 def create_generation(request: HumanImageRequest) -> AIImageGeneration:
@@ -127,4 +162,10 @@ def generation_to_dict(row: AIImageGeneration) -> dict[str, Any]:
     }
 
 
-__all__ = ["create_generation", "get_generation", "list_generations", "generation_to_dict"]
+__all__ = [
+    "create_generation",
+    "get_generation",
+    "list_generations",
+    "generation_to_dict",
+    "get_image_queue_status",
+]
