@@ -13,6 +13,9 @@ services:
         required: false
     environment:
       REDIS_URL: redis://redis:6379/0
+      SD_WEBUI_URL: ${SD_WEBUI_DOCKER_URL:-http://host.docker.internal:7860}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       redis:
         condition: service_healthy
@@ -63,6 +66,27 @@ services:
         required: false
     environment:
       REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  image-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: autoseller-image-worker
+    command: ["rq", "worker", "image", "--url", "redis://redis:6379/0"]
+    volumes:
+      - ./data:/app/data
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      SD_WEBUI_URL: ${SD_WEBUI_DOCKER_URL:-http://host.docker.internal:7860}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       redis:
         condition: service_healthy
