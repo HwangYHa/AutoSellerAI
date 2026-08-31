@@ -6,10 +6,10 @@ all txt2img work is queued on the dedicated RQ `image` worker.
 """
 from __future__ import annotations
 
-import json
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -109,7 +109,9 @@ def _generation_response(row) -> dict:
         for index in range(count)
     ]
     data["actual_seed"] = _actual_seed(data)
-    return data
+    # Keep the service helper useful outside FastAPI too: datetime and any
+    # future pydantic/enum values are normalized before leaving this boundary.
+    return jsonable_encoder(data)
 
 
 @router.get("/health")
