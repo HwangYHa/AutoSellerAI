@@ -1,12 +1,20 @@
-"""AutoSellerAI — Seller OS v3 is the default operating surface."""
+"""AutoSellerAI — Seller OS v3 is the default operating surface.
+
+The Streamlit entrypoint is deliberately named ``main.py`` instead of ``app.py``.
+The repository also has a top-level Python package named ``app``; keeping a
+``gui/app.py`` file lets Streamlit's script-directory sys.path entry shadow that
+package and can make ``import app.os`` resolve to the GUI script instead.
+"""
 from __future__ import annotations
 
 import os
 import sys
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
+# Streamlit prepends the script directory (``/app/gui``) to sys.path. Always put
+# the repository root first so the canonical top-level ``app`` package wins.
+sys.path[:] = [p for p in sys.path if os.path.abspath(p or os.curdir) != PROJECT_ROOT]
+sys.path.insert(0, PROJECT_ROOT)
 
 import streamlit as st
 
@@ -25,7 +33,7 @@ st.set_page_config(
 
 st.sidebar.markdown("## ⚡ AutoSellerAI")
 st.sidebar.caption("Seller OS · 하나의 운영 흐름")
-st.sidebar.page_link("app.py", label="Seller OS", icon="🎯")
+st.sidebar.page_link("main.py", label="Seller OS", icon="🎯")
 st.sidebar.page_link("pages/05_Order_Fulfillment_Monitor.py", label="주문·발주 관제센터", icon="🛰️")
 st.sidebar.page_link("pages/06_통합판매운영센터.py", label="통합 판매 운영센터", icon="🧭")
 st.sidebar.page_link("pages/07_커머스자동화제어센터.py", label="커머스 자동화 제어센터", icon="🤖")
