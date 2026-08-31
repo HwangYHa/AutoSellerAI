@@ -66,6 +66,10 @@ class StableDiffusionWebUIClient:
         data = self._request("GET", "/sdapi/v1/upscalers", timeout=20)
         return data if isinstance(data, list) else []
 
+    def latent_upscale_modes(self) -> list[dict[str, Any]]:
+        data = self._request("GET", "/sdapi/v1/latent-upscale-modes", timeout=20)
+        return data if isinstance(data, list) else []
+
     def checkpoints(self) -> list[dict[str, Any]]:
         data = self._request("GET", "/sdapi/v1/sd-models", timeout=30)
         return data if isinstance(data, list) else []
@@ -110,17 +114,27 @@ class StableDiffusionWebUIClient:
             samplers = self._optional(self.samplers, [])
             schedulers = self._optional(self.schedulers, [])
             upscalers = self._optional(self.upscalers, [])
+            latent_modes = self._optional(self.latent_upscale_modes, [])
             checkpoints = self._optional(self.checkpoints, [])
             scripts = self._optional(self.scripts, {"txt2img": [], "img2img": []})
             script_names = scripts.get("txt2img", []) if isinstance(scripts, dict) else []
             adetailer = any("adetailer" in name.lower() or "after detailer" in name.lower() for name in script_names)
+
+            upscaler_names = [str(x.get("name") or "") for x in upscalers if isinstance(x, dict)]
+            for row in latent_modes:
+                if not isinstance(row, dict):
+                    continue
+                name = str(row.get("name") or row.get("mode") or "")
+                if name and name not in upscaler_names:
+                    upscaler_names.append(name)
+
             return WebUICapabilities(
                 ok=True,
                 base_url=self.base_url,
                 model=str(options.get("sd_model_checkpoint") or ""),
                 samplers=[str(x.get("name") or x.get("label") or "") for x in samplers if isinstance(x, dict)],
                 schedulers=[str(x.get("name") or x.get("label") or "") for x in schedulers if isinstance(x, dict)],
-                upscalers=[str(x.get("name") or "") for x in upscalers if isinstance(x, dict)],
+                upscalers=upscaler_names,
                 txt2img_scripts=script_names,
                 checkpoints=[str(x.get("title") or x.get("model_name") or x.get("filename") or "") for x in checkpoints if isinstance(x, dict)],
                 adetailer_available=adetailer,
@@ -130,7 +144,7 @@ class StableDiffusionWebUIClient:
 
 
 def choose_upscaler(requested: str, available: list[str]) -> str | None:
-    clean = [x for x in available if x]
+    clean = [x for x in available if x and x.lower() != "none"]
     if not clean:
         return None
     if requested in clean:
