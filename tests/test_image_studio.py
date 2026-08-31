@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import base64
 import io
 import os
@@ -87,14 +88,27 @@ def test_generated_base64_image_is_validated_and_written(tmp_path, monkeypatch):
 def test_ui_and_compose_expose_dedicated_image_studio_worker():
     root = Path(__file__).resolve().parents[1]
     page = (root / "gui/pages/13_AI_인물_이미지_스튜디오.py").read_text(encoding="utf-8")
+    service = (root / "app/image_studio/service.py").read_text(encoding="utf-8")
     main = (root / "gui/main.py").read_text(encoding="utf-8")
     compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
     env_example = (root / ".env.example").read_text(encoding="utf-8")
+
+    # Keep the Streamlit page syntactically valid without importing/executing UI code in pytest.
+    ast.parse(page)
 
     assert "Stable Diffusion 이미지 생성" in page
     assert "얼굴·헤어" in page
     assert "체형" in page
     assert "의상·분위기" in page
+    assert "webui-user.bat" in page
+    assert "--api --listen --port 7860" in page
+    assert "get_image_queue_status" in page
+    assert "@st.fragment(run_every=live_interval)" in page
+    assert "실시간 진행 상태" in page
+    assert "같은 Seed 재생성" in page
+    assert "랜덤 Seed 재생성" in page
+    assert "Payload JSON 저장" in page
+    assert "Worker.all(queue=queue)" in service
     assert "AI 인물 이미지 스튜디오" in main
     assert "image-worker:" in compose
     assert '"image"' in compose
