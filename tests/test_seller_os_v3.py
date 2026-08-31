@@ -147,15 +147,19 @@ def test_normal_seller_os_ui_does_not_own_threads_orm_or_external_mutations():
     root = Path(__file__).resolve().parents[1]
     page = (root / "gui/pages/00_AutoSeller_Main.py").read_text(encoding="utf-8")
     workspace = (root / "gui/seller_os_v3.py").read_text(encoding="utf-8")
-    app = (root / "gui/app.py").read_text(encoding="utf-8")
+    entrypoint = (root / "gui/main.py").read_text(encoding="utf-8")
     compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
+    dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
 
     assert "services.background_jobs" not in page
     assert "from app.pipeline" not in page
     assert "sqlalchemy" not in page.lower()
     assert "execute_listing_publish" not in workspace
     assert 'queue_name="dangerous"' in workspace
-    assert "legacy_app" not in app
+    assert "legacy_app" not in entrypoint
+    assert not (root / "gui/app.py").exists()
+    assert 'streamlit", "run", "gui/main.py"' in dockerfile
+    assert 'page_link("main.py"' in entrypoint
     assert "seller-dangerous-worker" in compose
     assert "오늘 할 일" in workspace
     assert "주문 · 배송" in workspace
