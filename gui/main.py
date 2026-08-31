@@ -41,6 +41,7 @@ st.sidebar.page_link("pages/07_커머스자동화제어센터.py", label="커머
 st.sidebar.markdown("### 보조 작업공간")
 st.sidebar.page_link("pages/30_상품소싱.py", label="통합 상품 소싱", icon="🔎")
 st.sidebar.page_link("pages/25_AI_상세페이지_제작.py", label="콘텐츠 스튜디오", icon="🖼️")
+st.sidebar.page_link("pages/13_AI_인물_이미지_스튜디오.py", label="AI 인물 이미지 스튜디오", icon="🎨")
 st.sidebar.page_link("pages/10_Social_Commerce_Threads.py", label="마케팅 · Threads", icon="🧵")
 
 st.sidebar.markdown("---")
