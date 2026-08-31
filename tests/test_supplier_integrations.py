@@ -89,7 +89,7 @@ def test_supplier_diagnostic_pages_exist_but_normal_navigation_is_unified():
     assert (root / "gui/pages/21_도매꾹_연동.py").exists()
     assert (root / "gui/pages/22_온채널_연동.py").exists()
 
-    app_text = (root / "gui/app.py").read_text(encoding="utf-8")
+    app_text = (root / "gui/main.py").read_text(encoding="utf-8")
     assert "Seller OS" in app_text
     assert "통합 상품 소싱" in app_text
     assert 'page_link("pages/21_도매꾹_연동.py"' not in app_text
