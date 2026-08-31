@@ -40,6 +40,7 @@ from app.image_studio.mappings import (
     SHOT_MAP,
     SKIN_TONE_MAP,
     WAIST_HIP_MAP,
+    mapping_stats,
 )
 from app.image_studio.prompt_builder import build_prompt, build_txt2img_payload
 from app.image_studio.schemas import HumanImageRequest
@@ -109,8 +110,6 @@ def _generation_response(row) -> dict:
         for index in range(count)
     ]
     data["actual_seed"] = _actual_seed(data)
-    # Keep the service helper useful outside FastAPI too: datetime and any
-    # future pydantic/enum values are normalized before leaving this boundary.
     return jsonable_encoder(data)
 
 
@@ -143,6 +142,7 @@ def image_studio_catalog() -> dict:
     return {
         "webui": _capabilities(),
         "presets": PRESETS,
+        "mapping_stats": mapping_stats(),
         "options": {
             "gender": list(GENDER_MAP.keys()),
             "age": list(AGE_MAP.keys()),
