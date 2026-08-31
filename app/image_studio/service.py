@@ -52,16 +52,10 @@ def create_generation(request: HumanImageRequest) -> AIImageGeneration:
             result_ttl=86400,
             failure_ttl=604800,
         )
-
-        def set_job_id() -> None:
-            with get_db() as db:
-                row = db.get(AIImageGeneration, row_id)
-                if row:
-                    row.rq_job_id = job.id
-                    db.commit()
-
-        retry_sqlite_write(set_job_id, attempts=6)
     except Exception as exc:
+        # Only a genuine Redis/RQ enqueue failure marks the request failed.  A
+        # later SQLite journal update must not invalidate a job that is already
+        # present in Redis and may already be running.
         def mark_failed() -> None:
             with get_db() as db:
                 row = db.get(AIImageGeneration, row_id)
@@ -69,8 +63,23 @@ def create_generation(request: HumanImageRequest) -> AIImageGeneration:
                     row.status = "failed"
                     row.error = f"이미지 작업 큐 등록 실패: {exc}"[:4000]
                     db.commit()
+
         retry_sqlite_write(mark_failed, attempts=6)
         raise RuntimeError(f"이미지 작업을 큐에 등록하지 못했습니다: {exc}") from exc
+
+    def set_job_id() -> None:
+        with get_db() as db:
+            row = db.get(AIImageGeneration, row_id)
+            if row:
+                row.rq_job_id = job.id
+                db.commit()
+
+    # If this bookkeeping write is temporarily busy, surface the issue without
+    # changing status to failed: the queued worker job remains authoritative.
+    try:
+        retry_sqlite_write(set_job_id, attempts=6)
+    except Exception:
+        pass
 
     with get_db() as db:
         return db.get(AIImageGeneration, row_id)
