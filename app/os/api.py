@@ -12,6 +12,8 @@ from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
+from app.image_studio.api import router as image_studio_router
+from app.image_studio.models import ensure_image_studio_schema
 from app.os.approvals import decide_approval, get_pending_approvals
 from app.os.bridge import migrate_legacy_to_os
 from app.os.dashboard import get_dashboard, list_orders, list_products
@@ -20,7 +22,7 @@ from app.os.runtime_health import get_runtime_health
 from app.os.schema import ensure_os_schema, get_os_health
 from app.os.tasks import enqueue_task, get_task, list_tasks
 
-app = FastAPI(title="AutoSellerAI Seller OS API", version="3.0")
+app = FastAPI(title="AutoSellerAI Seller OS API", version="3.1")
 
 
 def _require_control_token(authorization: str | None = Header(default=None)) -> None:
@@ -70,6 +72,7 @@ class FulfillmentRequest(BaseModel):
 @app.on_event("startup")
 def _startup() -> None:
     ensure_os_schema()
+    ensure_image_studio_schema()
 
 
 @app.get("/health")
@@ -195,4 +198,5 @@ def legacy_bridge() -> dict:
     return migrate_legacy_to_os()
 
 
+router.include_router(image_studio_router)
 app.include_router(router)

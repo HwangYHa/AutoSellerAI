@@ -44,6 +44,14 @@ def _save_generated_images(record_id: int, encoded_images: list[str]) -> list[st
     return result
 
 
+def _delete_generated_images(paths: list[str]) -> None:
+    for value in paths:
+        try:
+            Path(value).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
 def _update_record(record_id: int, **values) -> None:
     def update() -> None:
         with get_db() as db:
@@ -57,14 +65,36 @@ def _update_record(record_id: int, **values) -> None:
     retry_sqlite_write(update, attempts=6)
 
 
+def _record_status(record_id: int) -> str:
+    with get_db() as db:
+        row = db.get(AIImageGeneration, int(record_id))
+        return str(row.status or "") if row else ""
+
+
+def _finish_cancelled(record_id: int, warnings: list[str]) -> dict:
+    _update_record(
+        record_id,
+        status="cancelled",
+        error="",
+        image_paths_json="[]",
+        warnings_json=json.dumps(warnings, ensure_ascii=False),
+        completed_at=datetime.utcnow(),
+    )
+    return {"ok": False, "cancelled": True, "generation_id": record_id, "warnings": warnings}
+
+
 def run_generation_job(record_id: int) -> dict:
-    """RQ worker entrypoint.  Generate, validate, store images and persist metadata."""
+    """RQ worker entrypoint. Generate, validate, store images and persist metadata."""
     ensure_image_studio_schema()
     with get_db() as db:
         row = db.get(AIImageGeneration, int(record_id))
         if not row:
             raise LookupError(f"AI image generation #{record_id} not found")
         request_json = row.request_json
+        initial_status = str(row.status or "")
+
+    if initial_status in {"cancel_requested", "cancelled"}:
+        return _finish_cancelled(record_id, [])
 
     req = HumanImageRequest.model_validate_json(request_json)
     _update_record(record_id, status="running", started_at=datetime.utcnow(), error="")
@@ -75,6 +105,9 @@ def run_generation_job(record_id: int) -> dict:
         caps = client.capabilities()
         if not caps.ok:
             raise RuntimeError(caps.error or "Stable Diffusion WebUI capability check failed")
+
+        if _record_status(record_id) == "cancel_requested":
+            return _finish_cancelled(record_id, warnings)
 
         updates = {}
         if caps.samplers and req.sampler_name not in caps.samplers:
@@ -115,10 +148,22 @@ def run_generation_job(record_id: int) -> dict:
             warnings_json=json.dumps(warnings, ensure_ascii=False),
         )
 
+        if _record_status(record_id) == "cancel_requested":
+            return _finish_cancelled(record_id, warnings)
+
         response = client.txt2img(payload)
+        if _record_status(record_id) == "cancel_requested":
+            return _finish_cancelled(record_id, warnings)
+
         image_paths = _save_generated_images(record_id, response.get("images", []))
         if not image_paths:
             raise RuntimeError("Stable Diffusion WebUI가 생성 이미지를 반환하지 않았습니다.")
+
+        # Close the tiny race where a cancel arrives after WebUI responded but
+        # before DB completion is committed. Do not leave orphan PNGs behind.
+        if _record_status(record_id) == "cancel_requested":
+            _delete_generated_images(image_paths)
+            return _finish_cancelled(record_id, warnings)
 
         raw_info = response.get("info", {})
         if isinstance(raw_info, str):
@@ -141,6 +186,8 @@ def run_generation_job(record_id: int) -> dict:
         )
         return {"ok": True, "generation_id": record_id, "images": image_paths, "warnings": warnings}
     except Exception as exc:
+        if _record_status(record_id) == "cancel_requested":
+            return _finish_cancelled(record_id, warnings)
         _update_record(
             record_id,
             status="failed",
