@@ -11,8 +11,6 @@ import os
 import sys
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-# Streamlit prepends the script directory (``/app/gui``) to sys.path. Always put
-# the repository root first so the canonical top-level ``app`` package wins.
 sys.path[:] = [p for p in sys.path if os.path.abspath(p or os.curdir) != PROJECT_ROOT]
 sys.path.insert(0, PROJECT_ROOT)
 
@@ -42,6 +40,7 @@ st.sidebar.markdown("### 보조 작업공간")
 st.sidebar.page_link("pages/30_상품소싱.py", label="통합 상품 소싱", icon="🔎")
 st.sidebar.page_link("pages/25_AI_상세페이지_제작.py", label="콘텐츠 스튜디오", icon="🖼️")
 st.sidebar.page_link("pages/13_AI_인물_이미지_스튜디오.py", label="AI 인물 이미지 스튜디오", icon="🎨")
+st.sidebar.page_link("pages/16_AI_체형_프리셋.py", label="AI 체형 프리셋", icon="🧍")
 st.sidebar.page_link("pages/14_상품_성장_워크플로우.py", label="상품 성장 워크플로우", icon="🚀")
 st.sidebar.page_link("pages/15_AI_캠페인_디렉터.py", label="AI Campaign Director", icon="🧠")
 st.sidebar.page_link("pages/10_Social_Commerce_Threads.py", label="마케팅 · Threads", icon="🧵")
