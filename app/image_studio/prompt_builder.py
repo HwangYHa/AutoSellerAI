@@ -9,33 +9,14 @@ from app.image_studio.body_profiles import (
     LEG_PROPORTION_MAP,
     MUSCLE_TONE_MAP,
     RIBCAGE_MAP,
+    inferred_profile,
 )
 from app.image_studio.mappings import (
-    AGE_MAP,
-    BACKGROUND_MAP,
-    BODY_FRAME_MAP,
-    CAMERA_MAP,
-    CHEST_PROPORTION_MAP,
-    DOF_MAP,
-    EXPRESSION_MAP,
-    FACE_SHAPE_MAP,
-    GENDER_MAP,
-    HAIR_COLOR_MAP,
-    HAIR_STYLE_MAP,
-    HEIGHT_MAP,
-    LIGHTING_MAP,
-    LIP_STYLE_MAP,
-    MOOD_MAP,
-    NOSE_STYLE_MAP,
-    OUTFIT_COLOR_MAP,
-    OUTFIT_MAP,
-    PERSONALITY_MAP,
-    POSE_MAP,
-    SHOULDER_MAP,
-    SHOT_MAP,
-    SKIN_TONE_MAP,
-    WAIST_HIP_MAP,
-    EYE_STYLE_MAP,
+    AGE_MAP, BACKGROUND_MAP, BODY_FRAME_MAP, CAMERA_MAP, CHEST_PROPORTION_MAP,
+    DOF_MAP, EXPRESSION_MAP, FACE_SHAPE_MAP, GENDER_MAP, HAIR_COLOR_MAP,
+    HAIR_STYLE_MAP, HEIGHT_MAP, LIGHTING_MAP, LIP_STYLE_MAP, MOOD_MAP,
+    NOSE_STYLE_MAP, OUTFIT_COLOR_MAP, OUTFIT_MAP, PERSONALITY_MAP, POSE_MAP,
+    SHOULDER_MAP, SHOT_MAP, SKIN_TONE_MAP, WAIST_HIP_MAP, EYE_STYLE_MAP,
 )
 from app.image_studio.schemas import HumanImageRequest, PromptBundle
 
@@ -66,73 +47,46 @@ BASE_NEGATIVE = (
 
 
 def _clean_fragment(value: str) -> str:
-    value = re.sub(r"\s+", " ", str(value or "")).strip(" ,")
-    return value
+    return re.sub(r"\s+", " ", str(value or "")).strip(" ,")
 
 
 def _join(*parts: str) -> str:
     return ", ".join(part for part in (_clean_fragment(x) for x in parts) if part)
 
 
+def resolved_body_profile(req: HumanImageRequest) -> str:
+    """Use an explicit profile when supplied; otherwise infer from legacy body_frame."""
+    return str(req.body_profile or "").strip() or inferred_profile(req.body_frame)
+
+
 def build_prompt(req: HumanImageRequest) -> PromptBundle:
-    subject = _join(
-        "one person",
-        GENDER_MAP[req.gender],
-        AGE_MAP[req.age],
-    )
-
+    profile_name = resolved_body_profile(req)
+    subject = _join("one person", GENDER_MAP[req.gender], AGE_MAP[req.age])
     appearance = _join(
-        HAIR_STYLE_MAP[req.hair_style],
-        HAIR_COLOR_MAP[req.hair_color],
-        FACE_SHAPE_MAP[req.face_shape],
-        EYE_STYLE_MAP[req.eye_style],
-        NOSE_STYLE_MAP[req.nose_style],
-        LIP_STYLE_MAP[req.lip_style],
-        SKIN_TONE_MAP[req.skin_tone],
-        EXPRESSION_MAP[req.expression],
+        HAIR_STYLE_MAP[req.hair_style], HAIR_COLOR_MAP[req.hair_color],
+        FACE_SHAPE_MAP[req.face_shape], EYE_STYLE_MAP[req.eye_style],
+        NOSE_STYLE_MAP[req.nose_style], LIP_STYLE_MAP[req.lip_style],
+        SKIN_TONE_MAP[req.skin_tone], EXPRESSION_MAP[req.expression],
     )
-
     body = _join(
-        BODY_PROFILE_MAP[req.body_profile],
-        BODY_FRAME_MAP[req.body_frame],
-        HEIGHT_MAP[req.height_impression],
-        SHOULDER_MAP[req.shoulder],
-        RIBCAGE_MAP[req.ribcage],
-        CHEST_PROPORTION_MAP[req.chest_proportion],
-        BUST_VOLUME_MAP[req.bust_volume],
-        WAIST_HIP_MAP[req.waist_hip],
-        MUSCLE_TONE_MAP[req.muscle_tone],
-        LEG_PROPORTION_MAP[req.leg_proportion],
+        BODY_PROFILE_MAP[profile_name], BODY_FRAME_MAP[req.body_frame],
+        HEIGHT_MAP[req.height_impression], SHOULDER_MAP[req.shoulder],
+        RIBCAGE_MAP[req.ribcage], CHEST_PROPORTION_MAP[req.chest_proportion],
+        BUST_VOLUME_MAP[req.bust_volume], WAIST_HIP_MAP[req.waist_hip],
+        MUSCLE_TONE_MAP[req.muscle_tone], LEG_PROPORTION_MAP[req.leg_proportion],
         "fully clothed adult commercial fashion/lifestyle presentation",
     )
-
     styling = _join(
-        OUTFIT_MAP[req.outfit],
-        OUTFIT_COLOR_MAP[req.outfit_color],
-        MOOD_MAP[req.mood],
-        PERSONALITY_MAP[req.personality],
+        OUTFIT_MAP[req.outfit], OUTFIT_COLOR_MAP[req.outfit_color],
+        MOOD_MAP[req.mood], PERSONALITY_MAP[req.personality],
     )
-
     scene = _join(
-        POSE_MAP[req.pose],
-        SHOT_MAP[req.shot],
-        BACKGROUND_MAP[req.background],
-        LIGHTING_MAP[req.lighting],
-        DOF_MAP[req.depth_of_field],
-        CAMERA_MAP[req.camera],
-        "sharp primary subject focus",
-        "realistic shadows and reflections",
+        POSE_MAP[req.pose], SHOT_MAP[req.shot], BACKGROUND_MAP[req.background],
+        LIGHTING_MAP[req.lighting], DOF_MAP[req.depth_of_field], CAMERA_MAP[req.camera],
+        "sharp primary subject focus", "realistic shadows and reflections",
     )
-
     positive = _join(
-        QUALITY_BLOCK,
-        subject,
-        appearance,
-        body,
-        styling,
-        scene,
-        ANATOMY_BLOCK,
-        req.custom_positive,
+        QUALITY_BLOCK, subject, appearance, body, styling, scene, ANATOMY_BLOCK, req.custom_positive,
     )
 
     negative_parts = [BASE_NEGATIVE]
@@ -142,18 +96,15 @@ def build_prompt(req: HumanImageRequest) -> PromptBundle:
         negative_parts.append("cropped legs, cropped shoes, missing feet")
     if req.pose == "상품을 들고 있기":
         negative_parts.append("floating object, object fused with hand, fingers through object")
-    if req.body_profile in {"슬림 글래머", "볼륨형"}:
+    if profile_name in {"슬림 글래머", "볼륨형"}:
         negative_parts.append("extreme hourglass, exaggerated torso, impossible chest proportions, artificial pin-up anatomy")
-    if req.body_profile == "운동형":
+    if profile_name == "운동형":
         negative_parts.append("bodybuilder physique, extreme muscle mass, exaggerated abs, masculine muscle exaggeration")
     if req.custom_negative:
         negative_parts.append(req.custom_negative)
 
     negative = _join(*negative_parts)
-    summary = (
-        f"{req.gender} · {req.age} · {req.body_profile} · {req.body_frame} · "
-        f"{req.outfit} · {req.background} · {req.shot}"
-    )
+    summary = f"{req.gender} · {req.age} · {profile_name} · {req.body_frame} · {req.outfit} · {req.background} · {req.shot}"
     return PromptBundle(positive=positive, negative=negative, subject_summary=summary)
 
 
@@ -182,42 +133,31 @@ def build_txt2img_payload(
         "save_images": False,
         "enable_hr": bool(req.enable_hr),
     }
-
     if req.enable_hr:
-        payload.update(
-            {
-                "hr_scale": req.hr_scale,
-                "hr_upscaler": selected_upscaler or req.hr_upscaler,
-                "hr_second_pass_steps": req.hr_second_pass_steps,
-                "denoising_strength": req.denoising_strength,
-            }
-        )
-
+        payload.update({
+            "hr_scale": req.hr_scale,
+            "hr_upscaler": selected_upscaler or req.hr_upscaler,
+            "hr_second_pass_steps": req.hr_second_pass_steps,
+            "denoising_strength": req.denoising_strength,
+        })
     if req.checkpoint:
-        # Per-request override avoids changing the global checkpoint for other jobs.
         payload["override_settings"] = {"sd_model_checkpoint": req.checkpoint}
         payload["override_settings_restore_afterwards"] = True
-
     if req.adetailer_enabled and adetailer_available:
-        # Current ADetailer REST API accepts a minimal dict per model.  Omitted
-        # fields use ADetailer's defaults, reducing breakage across extension versions.
         payload["alwayson_scripts"] = {
             "ADetailer": {
-                "args": [
-                    {
-                        "ad_model": req.adetailer_model,
-                        "ad_confidence": req.adetailer_confidence,
-                        "ad_denoising_strength": req.adetailer_denoising_strength,
-                        "ad_inpaint_only_masked": True,
-                        "ad_mask_blur": 4,
-                        "ad_prompt": "realistic detailed adult face, natural skin texture, coherent eyes, natural lips",
-                        "ad_negative_prompt": "distorted face, asymmetrical eyes, plastic skin, overprocessed face",
-                    }
-                ]
+                "args": [{
+                    "ad_model": req.adetailer_model,
+                    "ad_confidence": req.adetailer_confidence,
+                    "ad_denoising_strength": req.adetailer_denoising_strength,
+                    "ad_inpaint_only_masked": True,
+                    "ad_mask_blur": 4,
+                    "ad_prompt": "realistic detailed adult face, natural skin texture, coherent eyes, natural lips",
+                    "ad_negative_prompt": "distorted face, asymmetrical eyes, plastic skin, overprocessed face",
+                }]
             }
         }
-
     return payload
 
 
-__all__ = ["build_prompt", "build_txt2img_payload"]
+__all__ = ["build_prompt", "build_txt2img_payload", "resolved_body_profile"]
