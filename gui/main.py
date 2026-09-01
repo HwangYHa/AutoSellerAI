@@ -43,6 +43,7 @@ st.sidebar.page_link("pages/30_상품소싱.py", label="통합 상품 소싱", i
 st.sidebar.page_link("pages/25_AI_상세페이지_제작.py", label="콘텐츠 스튜디오", icon="🖼️")
 st.sidebar.page_link("pages/13_AI_인물_이미지_스튜디오.py", label="AI 인물 이미지 스튜디오", icon="🎨")
 st.sidebar.page_link("pages/14_상품_성장_워크플로우.py", label="상품 성장 워크플로우", icon="🚀")
+st.sidebar.page_link("pages/15_AI_캠페인_디렉터.py", label="AI Campaign Director", icon="🧠")
 st.sidebar.page_link("pages/10_Social_Commerce_Threads.py", label="마케팅 · Threads", icon="🧵")
 
 st.sidebar.markdown("---")
