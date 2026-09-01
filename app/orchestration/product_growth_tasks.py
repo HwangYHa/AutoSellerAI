@@ -34,10 +34,18 @@ def run_detail_generation_job(
                 raise LookupError("product not found")
             context = _product_dict(product)
 
+        # Product identity is important for commerce imagery. If the caller did
+        # not choose a reference explicitly, prefer the first verified product
+        # image instead of silently switching to unconstrained text-to-image.
+        effective_reference = str(reference_url or "").strip()
+        if not effective_reference:
+            images = [str(x) for x in context.get("images", []) if str(x).startswith(("http://", "https://"))]
+            effective_reference = images[0] if images else ""
+
         generated = generate_detail_images(
             context,
             count=max(1, min(int(count), 5)),
-            reference_url=str(reference_url or ""),
+            reference_url=effective_reference,
         )
         metadata = [
             {
@@ -52,13 +60,12 @@ def run_detail_generation_job(
         _set_workflow(
             workflow_id,
             detail_generated_json=json.dumps(metadata, ensure_ascii=False),
-            detail_image_urls_json=json.dumps(public_urls, ensure_ascii=False),
             error="",
         )
         applied = False
-        if apply and public_urls:
-            register_detail_assets(workflow_id, public_urls, apply=True)
-            applied = True
+        if public_urls:
+            register_detail_assets(workflow_id, public_urls, apply=bool(apply))
+            applied = bool(apply)
         _merge_step(
             workflow_id,
             "detail_generation",
@@ -67,6 +74,7 @@ def run_detail_generation_job(
                 "status": "completed",
                 "generated": len(generated),
                 "public_urls": len(public_urls),
+                "reference_used": bool(effective_reference),
                 "applied": applied,
             },
         )
@@ -75,6 +83,7 @@ def run_detail_generation_job(
             "workflow_id": workflow_id,
             "generated": len(generated),
             "public_urls": public_urls,
+            "reference_used": bool(effective_reference),
             "applied": applied,
         }
     except Exception as exc:
