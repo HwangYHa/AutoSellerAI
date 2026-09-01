@@ -21,6 +21,7 @@ from app.orchestration.product_growth import (
     schedule_workflow_post,
     stage_attached_social_visual,
     tracking_public_url,
+    use_detail_social_visual,
     use_product_social_visual,
     workflow_to_dict,
 )
@@ -69,7 +70,7 @@ class VisualStageRequest(BaseModel):
 class ScheduleWorkflowRequest(BaseModel):
     draft_id: int
     scheduled_at: datetime
-    media_source: Literal["workflow", "product", "none"] = "workflow"
+    media_source: Literal["workflow", "product", "detail", "none"] = "workflow"
     include_tracking_url: bool = True
 
 
@@ -80,15 +81,7 @@ def _to_utc_naive(value: datetime) -> datetime:
 
 
 def _public_response(row) -> dict:
-    data = workflow_to_dict(row)
-    generated = data.get("detail", {}).get("generated", [])
-    if isinstance(generated, list):
-        data["detail"]["generated"] = [
-            {k: item.get(k) for k in ("role", "public_url") if item.get(k)}
-            for item in generated
-            if isinstance(item, dict)
-        ]
-    return jsonable_encoder(data)
+    return jsonable_encoder(workflow_to_dict(row))
 
 
 @router.get("/catalog")
@@ -97,7 +90,7 @@ def catalog() -> dict:
         "target_platforms": ["smartstore", "coupang"],
         "threads_angles": ANGLES,
         "threads_tones": TONE_LABELS,
-        "social_visual_sources": ["workflow", "product", "none"],
+        "social_visual_sources": ["workflow", "product", "detail", "none"],
         "threads_media_public": media_base_is_public(),
         "design_rules": {
             "detail_page": "reference-grounded product imagery",
@@ -226,6 +219,16 @@ def workflow_visual_stage(workflow_id: int, body: VisualStageRequest) -> dict:
 def workflow_visual_product(workflow_id: int, body: VisualStageRequest) -> dict:
     try:
         return use_product_social_visual(workflow_id, body.image_index)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except IndexError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/workflows/{workflow_id}/social-visual/detail")
+def workflow_visual_detail(workflow_id: int, body: VisualStageRequest) -> dict:
+    try:
+        return use_detail_social_visual(workflow_id, body.image_index)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except IndexError as exc:
