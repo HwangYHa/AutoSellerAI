@@ -3,6 +3,13 @@ from __future__ import annotations
 
 import re
 
+from app.image_studio.body_profiles import (
+    BODY_PROFILE_MAP,
+    BUST_VOLUME_MAP,
+    LEG_PROPORTION_MAP,
+    MUSCLE_TONE_MAP,
+    RIBCAGE_MAP,
+)
 from app.image_studio.mappings import (
     AGE_MAP,
     BACKGROUND_MAP,
@@ -42,13 +49,15 @@ QUALITY_BLOCK = (
 
 ANATOMY_BLOCK = (
     "anatomically correct body, natural joints, realistic hands, five fingers on each visible hand, "
-    "natural posture, realistic limb proportions, symmetrical coherent facial structure"
+    "natural posture, realistic limb proportions, coherent torso anatomy, realistic gravity and clothing drape, "
+    "symmetrical coherent facial structure"
 )
 
 BASE_NEGATIVE = (
     "worst quality, low quality, lowres, blurry, motion blur, jpeg artifacts, oversharpened, "
     "bad anatomy, bad proportions, deformed body, malformed limbs, extra limbs, duplicated limbs, "
     "bad hands, malformed hands, extra fingers, missing fingers, fused fingers, six fingers, four fingers, "
+    "deformed torso, implausible ribcage, exaggerated body proportions, impossible waist, unnatural body curvature, "
     "deformed face, distorted face, asymmetrical eyes, cross-eyed, duplicate person, cloned face, "
     "unnatural skin, plastic skin, waxy skin, excessive beauty filter, uncanny face, "
     "cropped head, cropped feet, out of frame, text, watermark, logo, signature, "
@@ -84,11 +93,17 @@ def build_prompt(req: HumanImageRequest) -> PromptBundle:
     )
 
     body = _join(
+        BODY_PROFILE_MAP[req.body_profile],
         BODY_FRAME_MAP[req.body_frame],
         HEIGHT_MAP[req.height_impression],
         SHOULDER_MAP[req.shoulder],
-        WAIST_HIP_MAP[req.waist_hip],
+        RIBCAGE_MAP[req.ribcage],
         CHEST_PROPORTION_MAP[req.chest_proportion],
+        BUST_VOLUME_MAP[req.bust_volume],
+        WAIST_HIP_MAP[req.waist_hip],
+        MUSCLE_TONE_MAP[req.muscle_tone],
+        LEG_PROPORTION_MAP[req.leg_proportion],
+        "fully clothed adult commercial fashion/lifestyle presentation",
     )
 
     styling = _join(
@@ -127,11 +142,18 @@ def build_prompt(req: HumanImageRequest) -> PromptBundle:
         negative_parts.append("cropped legs, cropped shoes, missing feet")
     if req.pose == "상품을 들고 있기":
         negative_parts.append("floating object, object fused with hand, fingers through object")
+    if req.body_profile in {"슬림 글래머", "볼륨형"}:
+        negative_parts.append("extreme hourglass, exaggerated torso, impossible chest proportions, artificial pin-up anatomy")
+    if req.body_profile == "운동형":
+        negative_parts.append("bodybuilder physique, extreme muscle mass, exaggerated abs, masculine muscle exaggeration")
     if req.custom_negative:
         negative_parts.append(req.custom_negative)
 
     negative = _join(*negative_parts)
-    summary = f"{req.gender} · {req.age} · {req.body_frame} · {req.outfit} · {req.background} · {req.shot}"
+    summary = (
+        f"{req.gender} · {req.age} · {req.body_profile} · {req.body_frame} · "
+        f"{req.outfit} · {req.background} · {req.shot}"
+    )
     return PromptBundle(positive=positive, negative=negative, subject_summary=summary)
 
 
