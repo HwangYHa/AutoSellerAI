@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from app.image_studio.body_profile_reference import BODY_PROFILE_EXTENDED_REFERENCE
 from app.image_studio.body_profiles import (
     BODY_PROFILE_CONTROL_DEFAULTS,
     BODY_PROFILE_MAP,
@@ -24,6 +25,7 @@ def body_profiles_catalog() -> dict:
         "profile_prompts": dict(BODY_PROFILE_MAP),
         "profile_defaults": {key: dict(value) for key, value in BODY_PROFILE_CONTROL_DEFAULTS.items()},
         "reference_rows": profile_reference_rows(),
+        "extended_reference": {key: dict(value) for key, value in BODY_PROFILE_EXTENDED_REFERENCE.items()},
         "options": {
             "ribcage": list(RIBCAGE_MAP.keys()),
             "bust_volume": list(BUST_VOLUME_MAP.keys()),
