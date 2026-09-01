@@ -31,13 +31,9 @@ def test_legacy_body_frame_infers_new_profile_without_ui_changes():
 
 def test_explicit_profile_and_granular_controls_flow_into_prompt():
     req = HumanImageRequest(
-        body_profile="슬림 글래머",
-        body_frame="슬림 글래머",
-        ribcage="좁음",
-        bust_volume="보통~큰 편",
-        muscle_tone="보통·부드러움",
-        leg_proportion="약간 긴 편",
-        shot="전신",
+        body_profile="슬림 글래머", body_frame="슬림 글래머", ribcage="좁음",
+        bust_volume="보통~큰 편", muscle_tone="보통·부드러움",
+        leg_proportion="약간 긴 편", shot="전신",
     )
     bundle = build_prompt(req)
     positive = bundle.positive.lower()
@@ -62,6 +58,15 @@ def test_athletic_profile_has_anti_exaggeration_guard():
     negative = build_prompt(req).negative.lower()
     assert "bodybuilder physique" in negative
     assert "extreme muscle mass" in negative
+
+
+def test_female_specific_reference_does_not_leak_into_male_prompt():
+    req = HumanImageRequest(gender="남성", body_frame="애슬레틱", bust_volume="큼", ribcage="넓은 편")
+    positive = build_prompt(req).positive.lower()
+    assert "feminine silhouette" not in positive
+    assert "bust volume" not in positive
+    assert "full natural bust" not in positive
+    assert "adult korean man" in positive
 
 
 def test_every_profile_default_combination_validates():
