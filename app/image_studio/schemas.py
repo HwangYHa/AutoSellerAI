@@ -2,6 +2,13 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field, field_validator
 
+from app.image_studio.body_profiles import (
+    BODY_PROFILE_MAP,
+    BUST_VOLUME_MAP,
+    LEG_PROPORTION_MAP,
+    MUSCLE_TONE_MAP,
+    RIBCAGE_MAP,
+)
 from app.image_studio.mappings import (
     AGE_MAP,
     BACKGROUND_MAP,
@@ -37,7 +44,8 @@ class HumanImageRequest(BaseModel):
 
     All age choices are adults.  Free-form prompt fields are optional additions,
     not replacements for the structured prompt, so the app can preserve a stable
-    quality baseline.
+    quality baseline. Numeric body-profile references are UI metadata only; prompt
+    generation uses qualitative silhouette/anatomy language.
     """
 
     preset: str = "실사 인플루언서"
@@ -53,11 +61,16 @@ class HumanImageRequest(BaseModel):
     skin_tone: str = "내추럴"
     expression: str = "은은한 미소"
 
+    body_profile: str = "균형형"
     body_frame: str = "균형형"
     height_impression: str = "평균적인 인상"
-    shoulder: str = "균형 잡힌 어깨"
-    waist_hip: str = "균형형"
+    shoulder: str = "살짝 넓은 어깨"
+    waist_hip: str = "곡선형"
     chest_proportion: str = "자연스러운 비율"
+    ribcage: str = "보통"
+    bust_volume: str = "보통"
+    muscle_tone: str = "보통·자연스러움"
+    leg_proportion: str = "긴 편"
 
     outfit: str = "데일리 캐주얼"
     outfit_color: str = "자동/자연스럽게"
@@ -99,9 +112,10 @@ class HumanImageRequest(BaseModel):
     @field_validator(
         "preset", "gender", "age", "hair_style", "hair_color", "face_shape",
         "eye_style", "nose_style", "lip_style", "skin_tone", "expression",
-        "body_frame", "height_impression", "shoulder", "waist_hip",
-        "chest_proportion", "outfit", "outfit_color", "mood", "personality",
-        "pose", "shot", "background", "lighting", "depth_of_field", "camera",
+        "body_profile", "body_frame", "height_impression", "shoulder", "waist_hip",
+        "chest_proportion", "ribcage", "bust_volume", "muscle_tone", "leg_proportion",
+        "outfit", "outfit_color", "mood", "personality", "pose", "shot",
+        "background", "lighting", "depth_of_field", "camera",
     )
     @classmethod
     def validate_choice(cls, value: str, info):
@@ -117,11 +131,16 @@ class HumanImageRequest(BaseModel):
             "lip_style": LIP_STYLE_MAP,
             "skin_tone": SKIN_TONE_MAP,
             "expression": EXPRESSION_MAP,
+            "body_profile": BODY_PROFILE_MAP,
             "body_frame": BODY_FRAME_MAP,
             "height_impression": HEIGHT_MAP,
             "shoulder": SHOULDER_MAP,
             "waist_hip": WAIST_HIP_MAP,
             "chest_proportion": CHEST_PROPORTION_MAP,
+            "ribcage": RIBCAGE_MAP,
+            "bust_volume": BUST_VOLUME_MAP,
+            "muscle_tone": MUSCLE_TONE_MAP,
+            "leg_proportion": LEG_PROPORTION_MAP,
             "outfit": OUTFIT_MAP,
             "outfit_color": OUTFIT_COLOR_MAP,
             "mood": MOOD_MAP,
