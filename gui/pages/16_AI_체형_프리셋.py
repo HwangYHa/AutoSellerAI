@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import streamlit as st
 
+from app.image_studio.body_profile_reference import extended_reference
 from app.image_studio.body_profiles import (
     BODY_PROFILE_CONTROL_DEFAULTS,
     BODY_PROFILE_MAP,
@@ -13,15 +14,8 @@ from app.image_studio.body_profiles import (
     RIBCAGE_MAP,
 )
 from app.image_studio.mappings import (
-    BACKGROUND_MAP,
-    BODY_FRAME_MAP,
-    CHEST_PROPORTION_MAP,
-    HEIGHT_MAP,
-    OUTFIT_MAP,
-    POSE_MAP,
-    SHOULDER_MAP,
-    SHOT_MAP,
-    WAIST_HIP_MAP,
+    BACKGROUND_MAP, BODY_FRAME_MAP, CHEST_PROPORTION_MAP, HEIGHT_MAP,
+    OUTFIT_MAP, POSE_MAP, SHOULDER_MAP, SHOT_MAP, WAIST_HIP_MAP,
 )
 from app.image_studio.prompt_builder import build_prompt
 from app.image_studio.schemas import HumanImageRequest
@@ -34,7 +28,7 @@ apply_korean_patch()
 st.set_page_config(page_title="AI 체형 프리셋 | AutoSellerAI", page_icon="🧍", layout="wide")
 st.title("🧍 AI 인물 체형 프리셋")
 st.caption("매우 슬림 · 슬림 · 슬림 글래머 · 균형형 · 볼륨형 · 운동형을 Stable Diffusion에 맞는 실사형 자연어로 변환합니다.")
-st.info("키·체중·BMI·체지방률·브라 사이즈는 제공된 분류표를 보존하기 위한 참고 메타데이터입니다. 정확한 생성 수치나 건강 기준으로 사용하지 않습니다. 모든 기본 생성은 성인·완전 착의 상업/라이프스타일 이미지입니다.")
+st.info("키·체중·BMI·체지방률·밑가슴·브라 사이즈는 제공된 분류표를 보존하기 위한 참고 메타데이터입니다. 정확한 생성 수치나 건강 기준으로 사용하지 않습니다. 모든 기본 생성은 성인·완전 착의 상업/라이프스타일 이미지입니다.")
 
 
 def _caps() -> dict:
@@ -44,8 +38,24 @@ def _caps() -> dict:
         return {"ok": False, "error": str(exc)}
 
 
+def _apply_profile_defaults(profile_name: str) -> None:
+    defaults = BODY_PROFILE_CONTROL_DEFAULTS[profile_name]
+    keys = {
+        "body_frame": "bp_body_frame", "height_impression": "bp_height",
+        "shoulder": "bp_shoulder", "ribcage": "bp_ribcage",
+        "bust_volume": "bp_bust", "chest_proportion": "bp_chest",
+        "waist_hip": "bp_waist_hip", "muscle_tone": "bp_muscle",
+        "leg_proportion": "bp_leg",
+    }
+    for field, key in keys.items():
+        st.session_state[key] = defaults[field]
+
+
 caps = _caps()
-queue = get_image_queue_status()
+try:
+    queue = get_image_queue_status()
+except Exception as exc:
+    queue = {"ok": False, "workers": 0, "error": str(exc)}
 ready = bool(caps.get("ok") and queue.get("ok") and int(queue.get("workers") or 0) > 0)
 
 s1, s2, s3 = st.columns(3)
@@ -53,9 +63,18 @@ s1.metric("Stable Diffusion", "연결됨" if caps.get("ok") else "오프라인")
 s2.metric("Image Worker", f"{int(queue.get('workers') or 0)}개")
 s3.metric("생성 준비", "완료" if ready else "확인 필요")
 
-profile = st.selectbox("대표 체형", list(BODY_PROFILE_MAP.keys()), index=3)
+profile = st.selectbox("대표 체형", list(BODY_PROFILE_MAP.keys()), index=3, key="bp_profile")
 meta = BODY_PROFILE_META[profile]
-defaults = BODY_PROFILE_CONTROL_DEFAULTS[profile]
+if "bp_body_frame" not in st.session_state:
+    _apply_profile_defaults(profile)
+
+p_apply, p_hint = st.columns([1.2, 3.8])
+with p_apply:
+    if st.button("⚡ 이 프로필 권장값 적용", use_container_width=True):
+        _apply_profile_defaults(profile)
+        st.rerun()
+with p_hint:
+    st.caption("프로필을 바꾼 뒤 이 버튼을 누르면 흉곽·상체 볼륨·허리/힙·근육·다리 비율까지 권장 조합으로 맞춰집니다. 이후 항목별 수정도 가능합니다.")
 
 st.markdown("### 참고 프로필")
 a, b, c, d = st.columns(4)
@@ -69,23 +88,38 @@ st.caption(f"어깨 {meta['shoulder']} · 흉곽 {meta['ribcage']} · 밑가슴 
 if meta.get("bra_example"):
     st.caption(f"브라 사이즈 예시: {meta['bra_example']} · 실제 인물/생성 결과의 정확한 치수를 의미하지 않습니다.")
 
+with st.expander("📋 누락 없이 보존된 상세 참고표", expanded=False):
+    ext = extended_reference(profile)
+    labels = {
+        "bust_projection": "상체 측면 돌출 인상", "upper_lower_volume": "윗/아랫볼륨 분포",
+        "natural_shape": "자연스러운 형태", "waist_curve": "허리 굴곡",
+        "muscle_abdomen": "근육량/복부", "clothed_impression": "옷 입었을 때",
+        "ribcage_ratio": "흉곽 대비 실루엣", "side_projection": "측면 곡선",
+        "upper_chest_drape": "윗부분/중력감", "tshirt_fit": "티셔츠 착용 시",
+        "knit_fit": "니트 착용 시", "dress_fit": "원피스 착용 시",
+        "visual_emphasis_factors": "상대적으로 커 보이는 요인", "sd_phrase_reference": "SD 자연어 참고",
+    }
+    for key, label in labels.items():
+        if ext.get(key):
+            st.markdown(f"**{label}** · {ext[key]}")
+    st.caption("위 항목은 참고용 분류 데이터입니다. 생성 프롬프트에는 현실적인 해부학·의상 드레이프를 유지하는 범위의 질적 표현만 반영합니다.")
+
 st.divider()
 st.markdown("### 생성용 세부 조정")
-st.caption("대표 프리셋의 권장값을 시작점으로 사용합니다. 아래 항목을 바꾸면 해당 항목만 더 구체적으로 프롬프트에 반영됩니다.")
 
 c1, c2, c3 = st.columns(3)
 with c1:
-    body_frame = st.selectbox("전체 체형", list(BODY_FRAME_MAP), index=list(BODY_FRAME_MAP).index(defaults["body_frame"]))
-    height_impression = st.selectbox("키 인상", list(HEIGHT_MAP), index=list(HEIGHT_MAP).index(defaults["height_impression"]))
-    shoulder = st.selectbox("어깨선", list(SHOULDER_MAP), index=list(SHOULDER_MAP).index(defaults["shoulder"]))
+    body_frame = st.selectbox("전체 체형", list(BODY_FRAME_MAP), key="bp_body_frame")
+    height_impression = st.selectbox("키 인상", list(HEIGHT_MAP), key="bp_height")
+    shoulder = st.selectbox("어깨선", list(SHOULDER_MAP), key="bp_shoulder")
 with c2:
-    ribcage = st.selectbox("흉곽", list(RIBCAGE_MAP), index=list(RIBCAGE_MAP).index(defaults["ribcage"]))
-    bust_volume = st.selectbox("상체 볼륨", list(BUST_VOLUME_MAP), index=list(BUST_VOLUME_MAP).index(defaults["bust_volume"]))
-    chest_proportion = st.selectbox("상체 비율", list(CHEST_PROPORTION_MAP), index=list(CHEST_PROPORTION_MAP).index(defaults["chest_proportion"]))
+    ribcage = st.selectbox("흉곽", list(RIBCAGE_MAP), key="bp_ribcage")
+    bust_volume = st.selectbox("상체 볼륨", list(BUST_VOLUME_MAP), key="bp_bust")
+    chest_proportion = st.selectbox("상체 비율", list(CHEST_PROPORTION_MAP), key="bp_chest")
 with c3:
-    waist_hip = st.selectbox("허리·힙 실루엣", list(WAIST_HIP_MAP), index=list(WAIST_HIP_MAP).index(defaults["waist_hip"]))
-    muscle_tone = st.selectbox("근육·복부 톤", list(MUSCLE_TONE_MAP), index=list(MUSCLE_TONE_MAP).index(defaults["muscle_tone"]))
-    leg_proportion = st.selectbox("다리 비율 인상", list(LEG_PROPORTION_MAP), index=list(LEG_PROPORTION_MAP).index(defaults["leg_proportion"]))
+    waist_hip = st.selectbox("허리·힙 실루엣", list(WAIST_HIP_MAP), key="bp_waist_hip")
+    muscle_tone = st.selectbox("근육·복부 톤", list(MUSCLE_TONE_MAP), key="bp_muscle")
+    leg_proportion = st.selectbox("다리 비율 인상", list(LEG_PROPORTION_MAP), key="bp_leg")
 
 st.markdown("### 촬영 설정")
 p1, p2, p3 = st.columns(3)
