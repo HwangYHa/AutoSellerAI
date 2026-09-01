@@ -10,7 +10,7 @@ from app.db import Product, get_db, init_db
 from app.image_studio.models import AIImageGeneration, ensure_image_studio_schema
 from app.image_studio.schemas import HumanImageRequest
 from app.orchestration import product_growth
-from app.orchestration.product_growth_models import ensure_product_growth_schema
+from app.orchestration import product_growth_service as growth_service
 from app.os.api import app
 
 
@@ -60,6 +60,14 @@ def _workflow(product_id: int, **overrides):
     return product_growth.create_workflow(product_id, **values)
 
 
+def _fake_variants(count=2):
+    rows = [
+        {"body": "첫 번째 테스트 본문", "cta_keyword": "테스트포인트", "source": "test", "score": 91.0},
+        {"body": "두 번째 테스트 본문", "cta_keyword": "테스트포인트", "source": "test", "score": 87.0},
+    ]
+    return rows[:count]
+
+
 def test_product_growth_routes_are_mounted_under_seller_control_plane():
     paths = {getattr(route, "path", "") for route in app.routes}
     expected = {
@@ -89,18 +97,15 @@ def test_campaign_key_is_idempotent_per_product():
 def test_threads_drafts_keep_workflow_product_campaign_context(monkeypatch):
     product_id = _product()
     workflow = _workflow(product_id)
-    monkeypatch.setattr(
-        product_growth,
-        "generate_threads_content",
-        lambda *args, **kwargs: [
-            {"body": "첫 번째 테스트 본문", "cta_keyword": "테스트포인트", "source": "test", "score": 91.0},
-            {"body": "두 번째 테스트 본문", "cta_keyword": "테스트포인트", "source": "test", "score": 87.0},
-        ],
-    )
+    monkeypatch.setattr(growth_service, "generate_threads_content", lambda *args, **kwargs: _fake_variants(2))
     drafts = product_growth.prepare_threads_drafts(workflow.id, count=2)
     assert len(drafts) == 2
     assert all(row.product_id == product_id for row in drafts)
     assert all(row.target_platform == "smartstore" for row in drafts)
+
+    # Default repeat call reuses the same draft rows rather than multiplying content.
+    reused = product_growth.prepare_threads_drafts(workflow.id, count=2)
+    assert [x.id for x in reused] == [x.id for x in drafts]
 
     state = product_growth.workflow_to_dict(product_growth.get_workflow(workflow.id))
     assert state["status"] == "content_ready"
@@ -123,6 +128,14 @@ def test_detail_assets_update_product_detail_html():
             "https://cdn.example/detail-1.png",
             "https://cdn.example/detail-2.png",
         ]
+
+
+def test_detail_page_asset_can_be_reused_as_threads_visual():
+    product_id = _product(detail_images=json.dumps(["https://cdn.example/detail-social.png"]))
+    workflow = _workflow(product_id)
+    result = product_growth.use_detail_social_visual(workflow.id, 0)
+    assert result["source"] == "detail"
+    assert result["media_url"].endswith("detail-social.png")
 
 
 def test_only_completed_stable_diffusion_generation_can_attach():
@@ -159,24 +172,27 @@ def test_product_image_can_become_threads_visual():
     assert refreshed.social_media_url == result["media_url"]
 
 
-def test_schedule_preserves_campaign_and_does_not_publish_immediately(monkeypatch):
+def test_schedule_preserves_campaign_and_is_idempotent(monkeypatch):
     product_id = _product()
     workflow = _workflow(product_id)
-    monkeypatch.setattr(
-        product_growth,
-        "generate_threads_content",
-        lambda *args, **kwargs: [
-            {"body": "예약 게시 테스트", "cta_keyword": "테스트포인트", "source": "test", "score": 90.0},
-        ],
-    )
+    monkeypatch.setattr(growth_service, "generate_threads_content", lambda *args, **kwargs: _fake_variants(1))
     draft = product_growth.prepare_threads_drafts(workflow.id, count=1)[0]
+    when = datetime.utcnow() + timedelta(hours=1)
     scheduled = product_growth.schedule_workflow_post(
         workflow.id,
         draft_id=draft.id,
-        scheduled_at=datetime.utcnow() + timedelta(hours=1),
+        scheduled_at=when,
         media_source="none",
         include_tracking_url=False,
     )
+    duplicate = product_growth.schedule_workflow_post(
+        workflow.id,
+        draft_id=draft.id,
+        scheduled_at=when + timedelta(minutes=5),
+        media_source="none",
+        include_tracking_url=False,
+    )
+    assert duplicate.id == scheduled.id
     assert scheduled.status == "scheduled"
     assert scheduled.campaign_key == workflow.campaign_key
     assert scheduled.product_id == product_id
@@ -184,7 +200,29 @@ def test_schedule_preserves_campaign_and_does_not_publish_immediately(monkeypatc
 
     state = product_growth.workflow_to_dict(product_growth.get_workflow(workflow.id))
     assert state["status"] == "scheduled"
+    assert len(state["schedules"]) == 1
     assert state["performance"]["published_posts"] == 0
+
+
+def test_tracking_link_is_not_injected_without_public_base(monkeypatch):
+    product_id = _product()
+    workflow = _workflow(product_id, destination_url="https://shop.example/product")
+    monkeypatch.setattr(growth_service, "generate_threads_content", lambda *args, **kwargs: _fake_variants(1))
+    monkeypatch.delenv("PUBLIC_BASE_URL", raising=False)
+    draft = product_growth.prepare_threads_drafts(workflow.id, count=1)[0]
+    assert draft.target_url == "https://shop.example/product"
+    try:
+        product_growth.schedule_workflow_post(
+            workflow.id,
+            draft_id=draft.id,
+            scheduled_at=datetime.utcnow() + timedelta(hours=1),
+            media_source="none",
+            include_tracking_url=True,
+        )
+    except ValueError as exc:
+        assert "PUBLIC_BASE_URL" in str(exc)
+    else:
+        raise AssertionError("relative tracking URL must not be published")
 
 
 def test_catalog_documents_identity_and_publish_boundaries(monkeypatch):
