@@ -202,6 +202,27 @@ def _moderation_blocked(response: httpx.Response) -> bool:
     )
 
 
+# GPT Image 2 supports image edits but currently rejects the Images API
+# ``input_fidelity`` form field. Preserve the optional high-fidelity hint only
+# for the older image model where it is known to be accepted, and gracefully
+# retry without it if the API capability changes again.
+_INPUT_FIDELITY_MODELS = {"gpt-image-1.5"}
+
+
+def _supports_input_fidelity(model: str) -> bool:
+    return str(model or "").strip().lower() in _INPUT_FIDELITY_MODELS
+
+
+def _invalid_input_fidelity_model(response: httpx.Response) -> bool:
+    if response.status_code != 400:
+        return False
+    text = response.text.lower()
+    return (
+        "invalid_input_fidelity_model" in text
+        or ("input_fidelity" in text and "does not support" in text)
+    )
+
+
 def _request_image(
     *,
     headers: dict[str, str],
@@ -221,15 +242,28 @@ def _request_image(
             "size": size,
             "quality": quality,
             "output_format": "png",
-            "input_fidelity": "high",
         }
-        return httpx.post(
+        if _supports_input_fidelity(model):
+            data["input_fidelity"] = "high"
+
+        response = httpx.post(
             "https://api.openai.com/v1/images/edits",
             headers=headers,
             data=data,
             files=files,
             timeout=180,
         )
+        if "input_fidelity" in data and _invalid_input_fidelity_model(response):
+            retry_data = dict(data)
+            retry_data.pop("input_fidelity", None)
+            return httpx.post(
+                "https://api.openai.com/v1/images/edits",
+                headers=headers,
+                data=retry_data,
+                files=files,
+                timeout=180,
+            )
+        return response
 
     return httpx.post(
         "https://api.openai.com/v1/images/generations",
