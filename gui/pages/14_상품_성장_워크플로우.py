@@ -18,6 +18,7 @@ from app.orchestration.product_growth import (
     queue_detail_generation,
     schedule_workflow_post,
     stage_attached_social_visual,
+    use_detail_social_visual,
     use_product_social_visual,
     workflow_to_dict,
 )
@@ -120,13 +121,14 @@ with left:
         st.warning("상세페이지 이미지 또는 HTML이 아직 없습니다.")
 
     references = (state.get("product") or {}).get("images") or []
-    reference_url = st.selectbox("상품 외형 기준 이미지", [""] + references, format_func=lambda x: "선택 안 함" if not x else x)
+    reference_url = st.selectbox("상품 외형 기준 이미지", [""] + references, format_func=lambda x: "선택 안 함 · 첫 상품 이미지 자동 사용" if not x else x)
     detail_count = st.slider("새 상세페이지 장면 수", 1, 5, 3)
     paid_confirm = st.checkbox("유료 AI 상세 이미지 생성을 명시적으로 실행합니다.")
     if st.button("🖼️ 상세페이지 AI 생성 큐 등록", use_container_width=True, disabled=not paid_confirm):
         try:
             result = queue_detail_generation(workflow.id, count=detail_count, reference_url=reference_url, apply=True)
-            st.success(f"image-worker에 등록했습니다. Job: {result['job_id']}")
+            reused = " · 기존 실행 작업 재사용" if result.get("reused") else ""
+            st.success(f"image-worker에 등록했습니다. Job: {result['job_id']}{reused}")
             st.rerun()
         except Exception as exc:
             st.error(str(exc))
@@ -152,14 +154,14 @@ with right:
 
 st.divider()
 st.markdown("### 3. Threads 이미지 연결")
-vis1, vis2 = st.columns(2)
+vis1, vis2, vis3 = st.columns(3)
 with vis1:
-    st.markdown("#### 실제 상품 이미지 사용")
+    st.markdown("#### 실제 상품 대표 이미지")
     product_images = (state.get("product") or {}).get("images") or []
     if product_images:
         image_idx = st.selectbox("상품 이미지 번호", list(range(len(product_images))), format_func=lambda i: f"#{i + 1} · {product_images[i]}")
-        st.image(product_images[image_idx], width=360)
-        if st.button("✅ 이 상품 이미지를 Threads 캠페인에 연결", use_container_width=True):
+        st.image(product_images[image_idx], width=320)
+        if st.button("✅ 상품 이미지를 Threads에 연결", use_container_width=True):
             try:
                 use_product_social_visual(workflow.id, image_idx)
                 st.success("상품 이미지를 소셜 비주얼로 연결했습니다.")
@@ -170,11 +172,27 @@ with vis1:
         st.info("공개 URL 상품 이미지가 없습니다.")
 
 with vis2:
-    st.markdown("#### Stable Diffusion 라이프스타일 이미지 사용")
+    st.markdown("#### 상세페이지 컷 재사용")
+    detail_images = (state.get("product") or {}).get("detail_images") or []
+    if detail_images:
+        detail_idx = st.selectbox("상세 이미지 번호", list(range(len(detail_images))), format_func=lambda i: f"#{i + 1} · {detail_images[i]}")
+        st.image(detail_images[detail_idx], width=320)
+        if st.button("♻️ 상세페이지 컷을 Threads에 연결", use_container_width=True):
+            try:
+                use_detail_social_visual(workflow.id, detail_idx)
+                st.success("상세페이지 이미지를 소셜 비주얼로 재사용합니다.")
+                st.rerun()
+            except Exception as exc:
+                st.error(str(exc))
+    else:
+        st.info("재사용할 상세페이지 이미지가 없습니다.")
+
+with vis3:
+    st.markdown("#### Stable Diffusion 라이프스타일")
     st.caption("Stable Diffusion txt2img는 정확한 상품 복제용이 아닙니다. 가상 인플루언서·분위기·라이프스타일 소셜 컷에만 사용하세요.")
     completed = [row for row in list_generations(limit=100) if str(row.status) == "completed"]
     if completed:
-        generation = st.selectbox("완료된 AI 인물 이미지", completed, format_func=lambda x: f"Generation #{x.id} · {x.preset or '-'} · {x.subject_summary[:50]}")
+        generation = st.selectbox("완료된 AI 인물 이미지", completed, format_func=lambda x: f"Generation #{x.id} · {x.preset or '-'} · {x.subject_summary[:42]}")
         if st.button("🔗 이 Generation 연결", use_container_width=True):
             try:
                 attach_image_generation(workflow.id, generation.id)
@@ -194,17 +212,20 @@ with vis2:
                 except Exception as exc:
                     st.error(str(exc))
     else:
-        st.info("완료된 Stable Diffusion Generation이 없습니다. AI 인물 이미지 스튜디오에서 먼저 생성하세요.")
+        st.info("완료된 Stable Diffusion Generation이 없습니다.")
 
 if state["social_visual"]["media_url"]:
     st.info(f"현재 Threads 이미지: {state['social_visual']['media_url']}")
 if not media_base_is_public():
-    st.warning("Threads 로컬 미디어를 Meta가 가져가려면 PUBLIC_BASE_URL 또는 THREADS_MEDIA_PUBLIC_BASE_URL을 인터넷에서 접근 가능한 HTTPS 주소로 설정해야 합니다.")
+    st.warning("Stable Diffusion 로컬 파일을 Threads에서 사용하려면 PUBLIC_BASE_URL 또는 THREADS_MEDIA_PUBLIC_BASE_URL을 인터넷에서 접근 가능한 HTTPS 주소로 설정해야 합니다.")
 
 st.divider()
 st.markdown("### 4. 예약 게시 · Tracking")
 if state["tracking"]["ready"]:
-    st.success(f"Tracking Link 준비: {state['tracking']['url']}")
+    if state["tracking"].get("public"):
+        st.success(f"Tracking Link 공개 준비: {state['tracking']['url']}")
+    else:
+        st.warning(f"Tracking 레코드는 생성됐지만 게시 가능한 공개 주소가 아닙니다: {state['tracking']['url']}")
 elif state["destination_url"]:
     st.info("Threads 초안을 준비하면 Tracking Link가 자동 생성됩니다.")
 else:
@@ -217,9 +238,14 @@ if state["drafts"]:
     schedule_time = s2.time_input("게시 시간", value=time(19, 0))
     media_source = st.radio(
         "게시 이미지",
-        ["workflow", "product", "none"],
+        ["workflow", "product", "detail", "none"],
         horizontal=True,
-        format_func=lambda x: {"workflow": "현재 캠페인 이미지", "product": "상품 대표이미지", "none": "텍스트만"}[x],
+        format_func=lambda x: {
+            "workflow": "현재 캠페인 이미지",
+            "product": "상품 대표이미지",
+            "detail": "상세페이지 첫 이미지",
+            "none": "텍스트만",
+        }[x],
     )
     include_tracking = st.checkbox("게시문에 Tracking Link 포함", value=True)
     if st.button("🗓️ Threads 예약 게시 등록", type="primary", use_container_width=True):
