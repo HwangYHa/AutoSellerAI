@@ -48,7 +48,7 @@ WORKFLOW_STAGES: tuple[WorkflowStage, ...] = (
     WorkflowStage(5, "orders", "주문 수집", "쿠팡·스마트스토어 신규 주문을 Seller OS로 모읍니다.", "pages/00_AutoSeller_Main.py", safe_auto=True),
     WorkflowStage(6, "fulfillment", "발주 · 송장 · 배송", "주문/옵션/수취정보를 확인해 공급처에 발주하고 실제 송장을 판매채널로 돌려보냅니다.", "pages/00_AutoSeller_Main.py", approval_required=True),
     WorkflowStage(7, "settlement", "정산 · 실제 수익", "매출·공급가·수수료·배송·광고·반품·세금을 합쳐 실제 순이익을 확인합니다.", "pages/00_AutoSeller_Main.py"),
-    WorkflowStage(8, "growth", "마케팅 · 수익 학습", "스레드 콘텐츠와 구매귀속 데이터를 실제 순이익에 연결해 다음 판매 전략에 반영합니다.", "pages/10_Social_Commerce_Threads.py", optional=True, safe_auto=True),
+    WorkflowStage(8, "growth", "마케팅 · 수익 학습", "상세페이지·Threads 캠페인·구매귀속을 같은 상품/캠페인 키로 연결해 다음 판매 전략에 반영합니다.", "pages/14_상품_성장_워크플로우.py", optional=True, safe_auto=True),
 )
 
 
@@ -102,6 +102,13 @@ def get_process_status() -> dict[str, Any]:
             get_db, Product, Listing, PlatformOrder, Order,
             SettlementPeriod, SupplierRawProduct, SupplierWorkflowItem,
         )
+        from app.orchestration.product_growth_models import ProductGrowthWorkflow, ensure_product_growth_schema
+        from app.social.threads.growth_models import OrderAttribution, SocialContentDraft
+        from app.social.threads.migrations import ensure_threads_schema
+        from app.social.threads.models import ThreadsPost
+
+        ensure_threads_schema()
+        ensure_product_growth_schema()
         with get_db() as db:
             counts["products"] = _count(db, Product)
             counts["ready_products"] = _count(db, Product, status="ready")
@@ -114,6 +121,10 @@ def get_process_status() -> dict[str, Any]:
             counts["supplier_raw"] = _count(db, SupplierRawProduct)
             counts["workflow_items"] = _count(db, SupplierWorkflowItem)
             counts["selected_items"] = _count(db, SupplierRawProduct, is_selected=True)
+            counts["growth_workflows"] = _count(db, ProductGrowthWorkflow)
+            counts["threads_drafts"] = _count(db, SocialContentDraft)
+            counts["threads_posts"] = _count(db, ThreadsPost)
+            counts["attributed_orders"] = int(db.query(OrderAttribution).filter(OrderAttribution.attribution_type != "unattributed").count())
 
             image_ready = 0
             detail_ready = 0
@@ -140,6 +151,7 @@ def get_process_status() -> dict[str, Any]:
         stage_done["orders"] = counts["platform_orders"] > 0
         stage_done["fulfillment"] = bool(counts["supplier_ordered"] > 0 or counts["shipped_orders"] > 0)
         stage_done["settlement"] = bool(counts["financial_orders"] > 0 or counts["settlements"] > 0)
+        stage_done["growth"] = bool(counts["growth_workflows"] > 0 or counts["threads_posts"] > 0 or counts["attributed_orders"] > 0)
     except Exception as exc:
         logger.warning("원큐 상태 DB 집계 실패: %s", exc)
         counts["db_error"] = 1
