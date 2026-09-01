@@ -18,7 +18,7 @@ st.set_page_config(
 )
 
 st.sidebar.markdown("## 🛒 소셜커머스")
-st.sidebar.page_link("app.py", label="통합 판매 홈", icon="🏠")
+st.sidebar.page_link("main.py", label="통합 판매 홈", icon="🏠")
 st.sidebar.page_link("pages/10_Social_Commerce_Threads.py", label="스레드 운영센터", icon="🧵")
 st.sidebar.page_link("pages/11_Threads_Growth_Automation.py", label="성장 자동화", icon="📈")
 st.sidebar.page_link("pages/12_Threads_Profit_Intelligence.py", label="수익 인텔리전스", icon="💹")
