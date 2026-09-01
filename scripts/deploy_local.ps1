@@ -15,29 +15,33 @@ if (-not (Test-Path ".env")) {
     Write-Warning ".env was not found. External API integrations may not work."
 }
 
-Write-Host "[1/7] Sync main branch"
+Write-Host "[1/8] Sync main branch"
 & git switch main
 if ($LASTEXITCODE -ne 0) { throw "git switch main failed." }
 & git pull --ff-only origin main
 if ($LASTEXITCODE -ne 0) { throw "git pull failed." }
 
-Write-Host "[2/7] Validate Docker Compose configuration"
+Write-Host "[2/8] Validate Docker Compose configuration"
 & docker compose config --quiet
 if ($LASTEXITCODE -ne 0) { throw "docker compose config failed." }
 
-Write-Host "[3/7] Stop existing services"
+Write-Host "[3/8] Stop existing services"
 & docker compose down
 if ($LASTEXITCODE -ne 0) { throw "docker compose down failed." }
 
-Write-Host "[4/7] Build latest images"
+Write-Host "[4/8] Build latest images"
 & docker compose build --pull
 if ($LASTEXITCODE -ne 0) { throw "docker compose build failed." }
 
-Write-Host "[5/7] Start all services"
+Write-Host "[5/8] Remove historical CI test pollution"
+& docker compose run --rm --no-deps autoseller python scripts/cleanup_ci_test_pollution.py --apply
+if ($LASTEXITCODE -ne 0) { throw "CI test pollution cleanup failed." }
+
+Write-Host "[6/8] Start all services"
 & docker compose up -d --force-recreate
 if ($LASTEXITCODE -ne 0) { throw "docker compose up failed." }
 
-Write-Host "[6/7] Wait for service health"
+Write-Host "[7/8] Wait for service health"
 $deadline = (Get-Date).AddMinutes(3)
 $sellerOk = $false
 $apiOk = $false
@@ -94,7 +98,7 @@ if (-not ($sellerOk -and $apiOk -and $socialOk -and $redisOk)) {
     throw "One or more required services failed health checks."
 }
 
-Write-Host "[7/7] Final service status"
+Write-Host "[8/8] Final service status"
 & docker compose ps
 
 Write-Host ""
