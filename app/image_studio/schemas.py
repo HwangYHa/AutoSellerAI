@@ -2,43 +2,24 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field, field_validator
 
+from app.image_studio.body_profiles import (
+    BODY_PROFILE_MAP,
+    BUST_VOLUME_MAP,
+    LEG_PROPORTION_MAP,
+    MUSCLE_TONE_MAP,
+    RIBCAGE_MAP,
+)
 from app.image_studio.mappings import (
-    AGE_MAP,
-    BACKGROUND_MAP,
-    BODY_FRAME_MAP,
-    CAMERA_MAP,
-    CHEST_PROPORTION_MAP,
-    DOF_MAP,
-    EXPRESSION_MAP,
-    FACE_SHAPE_MAP,
-    GENDER_MAP,
-    HAIR_COLOR_MAP,
-    HAIR_STYLE_MAP,
-    HEIGHT_MAP,
-    LIGHTING_MAP,
-    LIP_STYLE_MAP,
-    MOOD_MAP,
-    NOSE_STYLE_MAP,
-    OUTFIT_COLOR_MAP,
-    OUTFIT_MAP,
-    PERSONALITY_MAP,
-    POSE_MAP,
-    PRESETS,
-    SHOULDER_MAP,
-    SHOT_MAP,
-    SKIN_TONE_MAP,
-    WAIST_HIP_MAP,
-    EYE_STYLE_MAP,
+    AGE_MAP, BACKGROUND_MAP, BODY_FRAME_MAP, CAMERA_MAP, CHEST_PROPORTION_MAP,
+    DOF_MAP, EXPRESSION_MAP, FACE_SHAPE_MAP, GENDER_MAP, HAIR_COLOR_MAP,
+    HAIR_STYLE_MAP, HEIGHT_MAP, LIGHTING_MAP, LIP_STYLE_MAP, MOOD_MAP,
+    NOSE_STYLE_MAP, OUTFIT_COLOR_MAP, OUTFIT_MAP, PERSONALITY_MAP, POSE_MAP,
+    PRESETS, SHOULDER_MAP, SHOT_MAP, SKIN_TONE_MAP, WAIST_HIP_MAP, EYE_STYLE_MAP,
 )
 
 
 class HumanImageRequest(BaseModel):
-    """UI-safe generation request.
-
-    All age choices are adults.  Free-form prompt fields are optional additions,
-    not replacements for the structured prompt, so the app can preserve a stable
-    quality baseline.
-    """
+    """UI-safe adult image request with backward-compatible structured controls."""
 
     preset: str = "실사 인플루언서"
     gender: str = "여성"
@@ -53,11 +34,18 @@ class HumanImageRequest(BaseModel):
     skin_tone: str = "내추럴"
     expression: str = "은은한 미소"
 
+    # Empty profile means: infer the new six-profile body language from body_frame.
+    # This keeps old saved generations and the existing body-frame UI compatible.
+    body_profile: str = ""
     body_frame: str = "균형형"
     height_impression: str = "평균적인 인상"
     shoulder: str = "균형 잡힌 어깨"
     waist_hip: str = "균형형"
     chest_proportion: str = "자연스러운 비율"
+    ribcage: str = "자동/프로필 기준"
+    bust_volume: str = "자동/프로필 기준"
+    muscle_tone: str = "자동/프로필 기준"
+    leg_proportion: str = "자동/프로필 기준"
 
     outfit: str = "데일리 캐주얼"
     outfit_color: str = "자동/자연스럽게"
@@ -93,45 +81,35 @@ class HumanImageRequest(BaseModel):
     adetailer_model: str = "face_yolov8n.pt"
     adetailer_confidence: float = Field(default=0.3, ge=0.05, le=0.95)
     adetailer_denoising_strength: float = Field(default=0.32, ge=0.0, le=1.0)
-
     checkpoint: str = ""
 
     @field_validator(
         "preset", "gender", "age", "hair_style", "hair_color", "face_shape",
         "eye_style", "nose_style", "lip_style", "skin_tone", "expression",
-        "body_frame", "height_impression", "shoulder", "waist_hip",
-        "chest_proportion", "outfit", "outfit_color", "mood", "personality",
-        "pose", "shot", "background", "lighting", "depth_of_field", "camera",
+        "body_profile", "body_frame", "height_impression", "shoulder", "waist_hip",
+        "chest_proportion", "ribcage", "bust_volume", "muscle_tone", "leg_proportion",
+        "outfit", "outfit_color", "mood", "personality", "pose", "shot",
+        "background", "lighting", "depth_of_field", "camera",
     )
     @classmethod
     def validate_choice(cls, value: str, info):
+        if info.field_name == "body_profile" and not str(value or "").strip():
+            return ""
         mapping_by_field = {
-            "preset": PRESETS,
-            "gender": GENDER_MAP,
-            "age": AGE_MAP,
-            "hair_style": HAIR_STYLE_MAP,
-            "hair_color": HAIR_COLOR_MAP,
-            "face_shape": FACE_SHAPE_MAP,
-            "eye_style": EYE_STYLE_MAP,
-            "nose_style": NOSE_STYLE_MAP,
-            "lip_style": LIP_STYLE_MAP,
-            "skin_tone": SKIN_TONE_MAP,
-            "expression": EXPRESSION_MAP,
-            "body_frame": BODY_FRAME_MAP,
-            "height_impression": HEIGHT_MAP,
-            "shoulder": SHOULDER_MAP,
-            "waist_hip": WAIST_HIP_MAP,
-            "chest_proportion": CHEST_PROPORTION_MAP,
-            "outfit": OUTFIT_MAP,
-            "outfit_color": OUTFIT_COLOR_MAP,
-            "mood": MOOD_MAP,
-            "personality": PERSONALITY_MAP,
-            "pose": POSE_MAP,
-            "shot": SHOT_MAP,
-            "background": BACKGROUND_MAP,
-            "lighting": LIGHTING_MAP,
-            "depth_of_field": DOF_MAP,
-            "camera": CAMERA_MAP,
+            "preset": PRESETS, "gender": GENDER_MAP, "age": AGE_MAP,
+            "hair_style": HAIR_STYLE_MAP, "hair_color": HAIR_COLOR_MAP,
+            "face_shape": FACE_SHAPE_MAP, "eye_style": EYE_STYLE_MAP,
+            "nose_style": NOSE_STYLE_MAP, "lip_style": LIP_STYLE_MAP,
+            "skin_tone": SKIN_TONE_MAP, "expression": EXPRESSION_MAP,
+            "body_profile": BODY_PROFILE_MAP, "body_frame": BODY_FRAME_MAP,
+            "height_impression": HEIGHT_MAP, "shoulder": SHOULDER_MAP,
+            "waist_hip": WAIST_HIP_MAP, "chest_proportion": CHEST_PROPORTION_MAP,
+            "ribcage": RIBCAGE_MAP, "bust_volume": BUST_VOLUME_MAP,
+            "muscle_tone": MUSCLE_TONE_MAP, "leg_proportion": LEG_PROPORTION_MAP,
+            "outfit": OUTFIT_MAP, "outfit_color": OUTFIT_COLOR_MAP,
+            "mood": MOOD_MAP, "personality": PERSONALITY_MAP, "pose": POSE_MAP,
+            "shot": SHOT_MAP, "background": BACKGROUND_MAP, "lighting": LIGHTING_MAP,
+            "depth_of_field": DOF_MAP, "camera": CAMERA_MAP,
         }
         mapping = mapping_by_field[info.field_name]
         if value not in mapping:

@@ -13,7 +13,10 @@ from pydantic import BaseModel, Field
 
 from app.config import get_settings
 from app.image_studio.api import router as image_studio_router
+from app.image_studio.body_profiles_api import router as body_profiles_router
 from app.image_studio.models import ensure_image_studio_schema
+from app.orchestration.campaign_director_api import router as campaign_director_router
+from app.orchestration.campaign_director_models import ensure_campaign_director_schema
 from app.orchestration.product_growth_api import router as product_growth_router
 from app.orchestration.product_growth_models import ensure_product_growth_schema
 from app.os.approvals import decide_approval, get_pending_approvals
@@ -25,7 +28,7 @@ from app.os.schema import ensure_os_schema, get_os_health
 from app.os.tasks import enqueue_task, get_task, list_tasks
 from app.social.threads.migrations import ensure_threads_schema
 
-app = FastAPI(title="AutoSellerAI Seller OS API", version="3.2")
+app = FastAPI(title="AutoSellerAI Seller OS API", version="3.3")
 
 
 def _require_control_token(authorization: str | None = Header(default=None)) -> None:
@@ -78,6 +81,7 @@ def _startup() -> None:
     ensure_image_studio_schema()
     ensure_threads_schema()
     ensure_product_growth_schema()
+    ensure_campaign_director_schema()
 
 
 @app.get("/health")
@@ -204,5 +208,7 @@ def legacy_bridge() -> dict:
 
 
 router.include_router(image_studio_router)
+router.include_router(body_profiles_router)
 router.include_router(product_growth_router)
+router.include_router(campaign_director_router)
 app.include_router(router)
