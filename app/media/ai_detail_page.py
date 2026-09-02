@@ -6,7 +6,7 @@
 - AI 생성은 사용자가 명시적으로 요청했을 때만 실행한다.
 - 민감/성인 전용 상품은 자연스러운 사용 맥락을 유지하되 노출·신체 접촉·행위 묘사를 만들지 않는다.
 - 생성 파일은 로컬 IMAGE_OUTPUT_DIR에 저장한다.
-- IMAGE_PUBLIC_BASE_URL이 설정되어 있으면 동일 파일명의 공개 URL도 반환한다.
+- Cloudflare R2가 활성화되어 있으면 저장 직후 업로드하고 실제 공개 URL을 반환한다.
 """
 from __future__ import annotations
 
@@ -16,11 +16,11 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin
 
 import httpx
 
 from app.config import get_settings
+from app.media.r2_storage import publish_generated_file
 
 
 @dataclass
@@ -330,9 +330,7 @@ def generate_detail_images(
         filename = f"{_safe_name(str(product.get('sku') or product.get('name') or 'product'))}-{role}-{uuid.uuid4().hex[:8]}.png"
         path = out_dir / filename
         path.write_bytes(binary)
-        public_url = ""
-        if s.image_public_base_url:
-            public_url = urljoin(s.image_public_base_url.rstrip("/") + "/", filename)
+        public_url = publish_generated_file(path)
         generated.append(GeneratedDetailImage(str(path), public_url, prompt, role))
 
     return generated
