@@ -201,11 +201,23 @@ def _release_wal_file_lock(lock_fd: int) -> None:
 
 
 def _enable_wal_on_connection(connection: Connection) -> bool:
-    """Attempt one WAL bootstrap using an already-open, transaction-free connection."""
+    """Attempt one WAL bootstrap using an already-open logical connection.
+
+    SQLAlchemy 2.x autobegins when ``exec_driver_sql`` runs, even for PRAGMAs.
+    The engine_connect hook executes before callers start their own transaction,
+    so any transaction created only by these PRAGMAs must be rolled back before
+    returning the connection. Otherwise a later ``engine.begin()`` fails with
+    ``InvalidRequestError`` because our bootstrap left an autobegin active.
+    """
     engine = connection.engine
     database_path = _engine_database_path(engine)
     if database_path is None:
         return True
+
+    # Never interfere with a connection that was somehow handed to this hook with
+    # an already-active caller transaction. The normal engine_connect path is clean.
+    if connection.in_transaction():
+        return engine in _wal_initialized_engines
 
     with _wal_init_lock:
         if engine in _wal_initialized_engines:
@@ -227,6 +239,11 @@ def _enable_wal_on_connection(connection: Connection) -> bool:
             # (or explicit ensure_sqlite_wal call) retries the transition.
             return False
         finally:
+            # PRAGMA execution starts SQLAlchemy's logical transaction. It contains
+            # no application writes, so rolling it back is both safe and required
+            # before returning control to engine.begin()/Session.
+            if connection.in_transaction():
+                connection.rollback()
             _release_wal_file_lock(lock_fd)
 
 
