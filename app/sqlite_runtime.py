@@ -5,9 +5,10 @@ AutoSellerAI runs several Docker processes against the same SQLite file
 one writer. WAL and busy_timeout reduce contention, while a shared file mutex
 serializes ORM writers across containers that mount the same data directory.
 
-Important: ``PRAGMA journal_mode=WAL`` is database-wide and may itself require a
-write lock. It must NOT run for every new connection. WAL is enabled explicitly
-once per SQLAlchemy Engine via :func:`ensure_sqlite_wal`.
+``PRAGMA journal_mode=WAL`` is database-wide, so it must not run on every pooled
+DBAPI connection. The runtime lazily enables WAL once per SQLAlchemy Engine on
+its first logical connection. This is important for legacy/Streamlit code paths
+that use ``app.db`` directly and never call Seller OS ``configure_database()``.
 """
 from __future__ import annotations
 
@@ -19,7 +20,7 @@ from pathlib import Path
 from typing import Any, Callable, TypeVar
 
 from sqlalchemy import event
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.schema import MetaData
@@ -43,6 +44,7 @@ _original_create_all = MetaData.create_all
 # concurrent writer sessions inside one Python process and is re-entrant for
 # nested flushes on the same thread.
 _process_writer_lock = threading.RLock()
+_wal_file_lock = threading.RLock()
 _wal_init_lock = threading.Lock()
 _wal_initialized_engines: "weakref.WeakSet[Engine]" = weakref.WeakSet()
 
@@ -80,11 +82,11 @@ def retry_sqlite_write(operation: Callable[[], T], *, attempts: int = 5) -> T:
 
 
 def _configure_sqlite_connection(dbapi_connection: Any, _connection_record: Any) -> None:
-    """Apply connection-local SQLite pragmas only.
+    """Apply connection-local SQLite pragmas.
 
-    Do not execute ``journal_mode=WAL`` here. Changing journal mode is a database-
-    wide operation and doing it on every pooled connection can race with ordinary
-    INSERT/UPDATE transactions and recreate ``database is locked`` failures.
+    ``journal_mode=WAL`` is deliberately absent here because this event runs for
+    every newly-created DBAPI connection. WAL bootstrap is handled once per
+    SQLAlchemy Engine by ``_auto_enable_sqlite_wal`` instead.
     """
     module = getattr(dbapi_connection.__class__, "__module__", "")
     if not module.startswith("sqlite3"):
@@ -157,45 +159,129 @@ def _release_database_file_lock(lock_fd: int) -> None:
         _process_writer_lock.release()
 
 
-def ensure_sqlite_wal(engine: Engine) -> bool:
-    """Enable persistent WAL mode once per Engine under the shared DB mutex.
+def _acquire_wal_file_lock(database_path: Path) -> int:
+    """Serialize WAL bootstrap across processes without reusing the writer lock.
 
-    WAL activation is deliberately separated from the ``Engine.connect`` event.
-    This prevents every new SQLAlchemy connection from competing for a database-
-    wide journal-mode lock while application writes are in flight.
-
-    Returns ``True`` when WAL is active or the engine is not a file-backed SQLite
-    engine. On transient startup contention it retries and returns ``False`` only
-    after the bounded attempts are exhausted; a later call may retry again.
+    The first database connection can be opened while an ORM flush already owns
+    ``.write.lock``. A distinct WAL lock avoids self-deadlock while still ensuring
+    that Docker services do not all try to transition journal mode at once.
     """
+    _wal_file_lock.acquire()
+    lock_fd: int | None = None
+    try:
+        lock_path = Path(f"{database_path}.wal.lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+        if fcntl is not None:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        return lock_fd
+    except Exception:
+        if lock_fd is not None:
+            try:
+                os.close(lock_fd)
+            except OSError:
+                pass
+        _wal_file_lock.release()
+        raise
+
+
+def _release_wal_file_lock(lock_fd: int) -> None:
+    try:
+        if fcntl is not None:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        try:
+            os.close(lock_fd)
+        except OSError:
+            pass
+    finally:
+        _wal_file_lock.release()
+
+
+def _enable_wal_on_connection(connection: Connection) -> bool:
+    """Attempt one WAL bootstrap using an already-open logical connection.
+
+    SQLAlchemy 2.x autobegins when ``exec_driver_sql`` runs, even for PRAGMAs.
+    The engine_connect hook executes before callers start their own transaction,
+    so any transaction created only by these PRAGMAs must be rolled back before
+    returning the connection. Otherwise a later ``engine.begin()`` fails with
+    ``InvalidRequestError`` because our bootstrap left an autobegin active.
+    """
+    engine = connection.engine
     database_path = _engine_database_path(engine)
     if database_path is None:
         return True
+
+    # Never interfere with a connection that was somehow handed to this hook with
+    # an already-active caller transaction. The normal engine_connect path is clean.
+    if connection.in_transaction():
+        return engine in _wal_initialized_engines
 
     with _wal_init_lock:
         if engine in _wal_initialized_engines:
             return True
 
-        for attempt, delay in enumerate(_WAL_RETRY_DELAYS):
-            lock_fd = _acquire_database_file_lock(database_path)
-            try:
-                with engine.connect() as conn:
-                    conn.exec_driver_sql(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
-                    mode = str(conn.exec_driver_sql("PRAGMA journal_mode=WAL").scalar_one()).lower()
-                if mode == "wal":
-                    _wal_initialized_engines.add(engine)
-                    return True
-            except OperationalError as exc:
-                if not is_sqlite_contention_error(exc):
-                    raise
-                if attempt >= len(_WAL_RETRY_DELAYS) - 1:
-                    return False
-            finally:
-                _release_database_file_lock(lock_fd)
+        lock_fd = _acquire_wal_file_lock(database_path)
+        try:
+            connection.exec_driver_sql(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
+            mode = str(connection.exec_driver_sql("PRAGMA journal_mode=WAL").scalar_one()).lower()
+            if mode == "wal":
+                _wal_initialized_engines.add(engine)
+                return True
+            return False
+        except OperationalError as exc:
+            if not is_sqlite_contention_error(exc):
+                raise
+            # Do not make an otherwise healthy read connection fail because another
+            # process happened to hold the DB during bootstrap. A later connection
+            # (or explicit ensure_sqlite_wal call) retries the transition.
+            return False
+        finally:
+            # PRAGMA execution starts SQLAlchemy's logical transaction. It contains
+            # no application writes, so rolling it back is both safe and required
+            # before returning control to engine.begin()/Session.
+            if connection.in_transaction():
+                connection.rollback()
+            _release_wal_file_lock(lock_fd)
 
+
+def _auto_enable_sqlite_wal(connection: Connection) -> None:
+    """Enable WAL on the first logical connection of every file-backed SQLite Engine."""
+    _enable_wal_on_connection(connection)
+
+
+def ensure_sqlite_wal(engine: Engine) -> bool:
+    """Ensure persistent WAL mode for a file-backed SQLite Engine.
+
+    Most callers no longer need to invoke this explicitly because the global
+    ``engine_connect`` hook performs the same bootstrap lazily. This function is
+    retained for startup checks and tests and provides bounded retries when the
+    first transition meets transient contention.
+    """
+    database_path = _engine_database_path(engine)
+    if database_path is None:
+        return True
+    if engine in _wal_initialized_engines:
+        return True
+
+    for attempt, delay in enumerate(_WAL_RETRY_DELAYS):
+        try:
+            # Creating the logical SQLAlchemy Connection fires engine_connect,
+            # which performs the one-per-Engine WAL transition without recursion.
+            with engine.connect():
+                pass
+        except OperationalError as exc:
+            if not is_sqlite_contention_error(exc):
+                raise
+
+        if engine in _wal_initialized_engines:
+            return True
+        if attempt < len(_WAL_RETRY_DELAYS) - 1:
             time.sleep(delay)
 
-        return False
+    return False
 
 
 def _acquire_writer_lock(session: Session, _flush_context: Any, _instances: Any) -> None:
@@ -244,6 +330,7 @@ def install_sqlite_runtime() -> None:
         return
 
     event.listen(Engine, "connect", _configure_sqlite_connection)
+    event.listen(Engine, "engine_connect", _auto_enable_sqlite_wal)
     MetaData.create_all = _create_all_with_retry  # type: ignore[method-assign]
 
     # ORM writes are serialized across all containers that share the DB directory.
