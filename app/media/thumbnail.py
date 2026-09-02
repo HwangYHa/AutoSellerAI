@@ -2,6 +2,7 @@
 
 상세페이지 이미지와 동일한 OpenAI 이미지 설정/안전정책을 재사용하되,
 대표이미지 용도에 맞춰 1:1 구도와 상품 중심 프롬프트를 사용한다.
+생성 직후 Cloudflare R2가 활성화되어 있으면 공개 저장소로 업로드한다.
 """
 from __future__ import annotations
 
@@ -10,10 +11,10 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin
 
 from app.config import get_settings
 from app.media.ai_detail_page import _download_reference, _extract_b64, _moderation_blocked, _request_image, _safe_name
+from app.media.r2_storage import publish_generated_file
 
 
 @dataclass
@@ -99,10 +100,7 @@ def generate_thumbnail(
     filename = f"{_safe_name(str(product.get('sku') or product.get('name') or 'product'))}-thumbnail-{uuid.uuid4().hex[:8]}.png"
     path = out_dir / filename
     path.write_bytes(base64.b64decode(b64))
-
-    public_url = ""
-    if s.image_public_base_url:
-        public_url = urljoin(s.image_public_base_url.rstrip("/") + "/", f"thumbnails/{filename}")
+    public_url = publish_generated_file(path)
 
     return GeneratedThumbnail(
         local_path=str(path),

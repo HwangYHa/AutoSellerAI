@@ -125,6 +125,17 @@ class Settings(BaseSettings):
     image_source_page_fetch: bool = True
     image_output_dir: str = "data/generated"
     image_public_base_url: str = ""
+    image_cdn_base_url: str = ""
+
+    # Cloudflare R2 — S3 호환 object storage
+    r2_enabled: bool = False
+    r2_access_key_id: str = ""
+    r2_secret_access_key: str = ""
+    r2_bucket: str = ""
+    r2_endpoint: str = ""
+    r2_object_prefix: str = "generated"
+    r2_region: str = "auto"
+    r2_cache_control: str = "public, max-age=31536000, immutable"
 
     @field_validator("image_ai_model", mode="before")
     @classmethod
