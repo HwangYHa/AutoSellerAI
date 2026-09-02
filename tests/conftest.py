@@ -27,7 +27,7 @@ os.environ["AUTOSELLER_TESTING"] = "1"
 
 # Remove stale files from an interrupted prior pytest process using the same
 # explicit override path. The PID-based default normally makes this unnecessary.
-for suffix in ("", "-wal", "-shm", ".write.lock"):
+for suffix in ("", "-wal", "-shm", ".write.lock", ".wal.lock"):
     path = Path(f"{_TEST_DB_PATH}{suffix}")
     try:
         if path.exists():
@@ -46,7 +46,7 @@ def pytest_sessionfinish(session, exitstatus):  # noqa: ARG001
     except Exception:
         pass
 
-    for suffix in ("", "-wal", "-shm", ".write.lock"):
+    for suffix in ("", "-wal", "-shm", ".write.lock", ".wal.lock"):
         path = Path(f"{_TEST_DB_PATH}{suffix}")
         try:
             if path.exists():
