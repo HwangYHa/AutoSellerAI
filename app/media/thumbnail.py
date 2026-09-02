@@ -3,14 +3,21 @@
 상세페이지 이미지와 동일한 OpenAI 이미지 설정/안전정책을 재사용하되,
 대표이미지 용도에 맞춰 1:1 구도와 상품 중심 프롬프트를 사용한다.
 생성 직후 Cloudflare R2가 활성화되어 있으면 공개 저장소로 업로드한다.
+
+성인용 성적 제품처럼 이미지 생성 안전 시스템에서 차단될 가능성이 높은 상품은
+프롬프트를 우회하거나 반복 호출하지 않는다. 공급처 reference 이미지를 그대로
+리사이즈/패딩하는 비생성형 썸네일로 전환해 원본 상품 정체성을 보존한다.
 """
 from __future__ import annotations
 
 import base64
 import uuid
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from typing import Any
+
+from PIL import Image, ImageOps
 
 from app.config import get_settings
 from app.media.ai_detail_page import _download_reference, _extract_b64, _moderation_blocked, _request_image, _safe_name
@@ -23,6 +30,122 @@ class GeneratedThumbnail:
     public_url: str
     prompt: str
     model: str
+
+
+_ADULT_SEXUAL_MARKERS = (
+    "성인용품",
+    "성인 용품",
+    "성인용 완구",
+    "성인완구",
+    "성인 전용",
+    "19금",
+    "19세 이상",
+    "커플용품",
+    "바이브레이터",
+    "딜도",
+    "섹스토이",
+    "섹스 토이",
+    "자위기구",
+    "자위 기구",
+    "진동 흡입기",
+    "진동흡입기",
+    "adult toy",
+    "adult-only",
+    "sex toy",
+    "vibrator",
+    "dildo",
+    "masturbator",
+)
+
+
+def _is_adult_sexual_product(product: dict[str, Any]) -> bool:
+    """Detect products that should use a non-generative image path.
+
+    This is deliberately a conservative commerce guard, not an attempt to predict
+    OpenAI moderation exactly. The goal is to avoid sending clearly sexual adult
+    products to image generation and then trying to work around a safety block.
+    """
+    for key in ("adult_only", "adult", "restricted"):
+        if bool(product.get(key)):
+            return True
+    if product.get("minor_purchasable") is False:
+        return True
+
+    haystack = " ".join(
+        str(product.get(key) or "")
+        for key in ("name", "category", "subcategory", "tags")
+    ).lower()
+    return any(marker in haystack for marker in _ADULT_SEXUAL_MARKERS)
+
+
+def _thumbnail_square_size(configured_size: str) -> int:
+    try:
+        left, right = str(configured_size or "1024x1024").lower().split("x", 1)
+        width, height = int(left), int(right)
+        if width > 0 and height > 0:
+            return min(width, height)
+    except Exception:
+        pass
+    return 1024
+
+
+def _reference_fallback_thumbnail(
+    product: dict[str, Any],
+    *,
+    ref: tuple[bytes, str] | None,
+    prompt: str,
+    configured_size: str,
+) -> GeneratedThumbnail:
+    """Create a non-generative square thumbnail from the original reference.
+
+    No content is invented, removed, or transformed semantically. The source image
+    is EXIF-corrected, scaled to fit and centered on a white square canvas.
+    """
+    if not ref or not ref[0]:
+        raise RuntimeError(
+            "이 상품은 AI 이미지 생성 대신 원본 이미지 기반 안전 썸네일을 사용해야 합니다. "
+            "먼저 공급처 원본 이미지를 선택한 뒤 다시 시도하세요."
+        )
+
+    target = _thumbnail_square_size(configured_size)
+    try:
+        with Image.open(BytesIO(ref[0])) as source:
+            source = ImageOps.exif_transpose(source)
+            if source.mode not in ("RGB", "RGBA"):
+                source = source.convert("RGBA")
+            if source.mode == "RGBA":
+                background = Image.new("RGBA", source.size, (255, 255, 255, 255))
+                background.alpha_composite(source)
+                source = background.convert("RGB")
+            else:
+                source = source.convert("RGB")
+
+            content_box = max(1, int(target * 0.88))
+            fitted = ImageOps.contain(source, (content_box, content_box), Image.Resampling.LANCZOS)
+            canvas = Image.new("RGB", (target, target), (255, 255, 255))
+            x = (target - fitted.width) // 2
+            y = (target - fitted.height) // 2
+            canvas.paste(fitted, (x, y))
+    except Exception as exc:
+        raise RuntimeError(f"원본 이미지 기반 안전 썸네일 처리에 실패했습니다: {exc}") from exc
+
+    s = get_settings()
+    out_dir = Path(s.image_output_dir or "data/generated") / "thumbnails"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    filename = (
+        f"{_safe_name(str(product.get('sku') or product.get('name') or 'product'))}"
+        f"-reference-thumbnail-{uuid.uuid4().hex[:8]}.png"
+    )
+    path = out_dir / filename
+    canvas.save(path, format="PNG", optimize=True)
+    public_url = publish_generated_file(path)
+
+    return GeneratedThumbnail(
+        local_path=str(path),
+        public_url=public_url,
+        prompt=prompt,
+        model="local-reference-fallback",
+    )
 
 
 def build_thumbnail_prompt(product: dict[str, Any], *, style: str = "marketplace") -> str:
@@ -70,13 +193,25 @@ def generate_thumbnail(
     s = get_settings()
     if not s.image_ai_enabled:
         raise RuntimeError("IMAGE_AI_ENABLED=false 입니다. 설정에서 AI 이미지 생성을 활성화하세요.")
+
+    prompt = build_thumbnail_prompt(product, style=style)
+    ref = _download_reference(reference_url)
+
+    # Clearly sexual adult products do not go to the generative image endpoint.
+    # Use the exact supplier/reference image and only normalize its canvas.
+    if _is_adult_sexual_product(product):
+        return _reference_fallback_thumbnail(
+            product,
+            ref=ref,
+            prompt=prompt,
+            configured_size=s.image_thumbnail_size,
+        )
+
     if (s.image_ai_provider or "openai").lower() != "openai":
         raise RuntimeError("현재 썸네일 생성기는 IMAGE_AI_PROVIDER=openai를 지원합니다.")
     if not s.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY가 설정되지 않았습니다.")
 
-    prompt = build_thumbnail_prompt(product, style=style)
-    ref = _download_reference(reference_url)
     headers = {"Authorization": f"Bearer {s.openai_api_key.strip()}"}
     response = _request_image(
         headers=headers,
@@ -88,7 +223,20 @@ def generate_thumbnail(
     )
     if response.status_code not in (200, 201):
         if _moderation_blocked(response):
-            raise RuntimeError(f"AI 썸네일 생성이 안전 필터에서 차단되었습니다. 원본 응답: {response.text[:350]}")
+            # A reference image itself can trigger moderation even when product text
+            # did not match our conservative classifier. Do not retry with euphemisms;
+            # fall back to the original supplier image when available.
+            if ref:
+                return _reference_fallback_thumbnail(
+                    product,
+                    ref=ref,
+                    prompt=prompt,
+                    configured_size=s.image_thumbnail_size,
+                )
+            raise RuntimeError(
+                "AI 이미지 생성 안전 정책으로 이 상품의 생성형 썸네일을 만들 수 없습니다. "
+                "공급처 원본 이미지를 선택하면 비생성형 안전 썸네일로 처리할 수 있습니다."
+            )
         raise RuntimeError(f"AI 썸네일 생성 실패 HTTP {response.status_code}: {response.text[:500]}")
 
     b64 = _extract_b64(response.json())
