@@ -10,14 +10,17 @@ AutoSellerAI를 통하지 않고 쿠팡 Wing 또는 네이버 스마트스토어
 3. 이름이 같은 로컬 상품이 있고 해당 플랫폼 Listing이 없으면 그 상품에 연결한다.
 4. 나머지는 source={platform}_import 신규 Product로 만든다.
 5. 판매채널 API의 상대 이미지 경로는 DB에 저장하기 전에 브라우저 표시 가능한 절대 URL로 정규화한다.
+6. SQLite 쓰기 트랜잭션은 상품 1건 단위로 짧게 유지하고 lock 충돌 시 해당 상품만 재시도한다.
 """
 from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any
 
 import httpx
+from sqlalchemy.exc import OperationalError
 
 from app.db import Listing, Product, get_db
 from app.media.marketplace_images import (
@@ -29,12 +32,20 @@ from app.seo.duplicate_detector import _normalize
 
 logger = logging.getLogger(__name__)
 
+_SYNC_LOCK_RETRIES = 6
+_SYNC_LOCK_BACKOFF_SECONDS = 0.25
+
 
 def _number(value: Any) -> float:
     try:
         return float(value or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _is_database_locked(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return "database is locked" in text or "database table is locked" in text
 
 
 def _item_images(item: dict, platform: str) -> tuple[list[str], list[str]]:
@@ -140,59 +151,89 @@ def _apply_external_fields(product: Product, item: dict, platform: str) -> bool:
     return changed
 
 
-def _sync(platform: str, items: list[dict]) -> dict:
-    created = linked = updated = skipped = 0
+def _sync_one(platform: str, item: dict) -> str:
+    """한 상품만 짧은 트랜잭션으로 반영하고 결과 종류를 반환한다."""
+    platform_id = str(item.get("platform_id", "") or "").strip()
+    name = str(item.get("name", "") or "").strip()
+    if not platform_id or not name:
+        return "skipped"
 
     with get_db() as db:
-        for item in items:
-            platform_id = str(item.get("platform_id", "") or "").strip()
-            name = str(item.get("name", "") or "").strip()
-            if not platform_id or not name:
-                skipped += 1
-                continue
+        listing = db.query(Listing).filter_by(
+            platform=platform, platform_id=platform_id
+        ).first()
 
-            listing = db.query(Listing).filter_by(
-                platform=platform, platform_id=platform_id
-            ).first()
+        if listing:
+            product = db.query(Product).filter_by(id=listing.product_id).first()
+            changed = False
+            if product:
+                changed = _apply_external_fields(product, item, platform)
+            if listing.status != "success" or listing.error:
+                listing.status = "success"
+                listing.error = ""
+                changed = True
+            db.commit()
+            return "updated" if changed else "skipped"
 
-            if listing:
-                product = db.query(Product).filter_by(id=listing.product_id).first()
-                changed = False
-                if product:
-                    changed = _apply_external_fields(product, item, platform)
-                if listing.status != "success" or listing.error:
-                    listing.status = "success"
-                    listing.error = ""
-                    changed = True
-                if changed:
-                    updated += 1
-                else:
-                    skipped += 1
-                continue
-
-            product, was_created = _find_or_link_product(db, platform, platform_id, item)
-            _apply_external_fields(product, item, platform)
-            db.add(Listing(
-                product_id=product.id,
-                platform=platform,
-                platform_id=platform_id,
-                status="success",
-            ))
-            if was_created:
-                created += 1
-            else:
-                linked += 1
-
+        product, was_created = _find_or_link_product(db, platform, platform_id, item)
+        _apply_external_fields(product, item, platform)
+        db.add(Listing(
+            product_id=product.id,
+            platform=platform,
+            platform_id=platform_id,
+            status="success",
+        ))
         db.commit()
+        return "created" if was_created else "linked"
 
-    return {
-        "ok": True,
+
+def _sync(platform: str, items: list[dict]) -> dict:
+    counts = {"created": 0, "linked": 0, "updated": 0, "skipped": 0}
+    failed = 0
+    errors: list[str] = []
+
+    for item in items:
+        platform_id = str(item.get("platform_id", "") or "").strip()
+        for attempt in range(_SYNC_LOCK_RETRIES + 1):
+            try:
+                outcome = _sync_one(platform, item)
+                counts[outcome] += 1
+                break
+            except OperationalError as exc:
+                if not _is_database_locked(exc):
+                    raise
+                if attempt >= _SYNC_LOCK_RETRIES:
+                    failed += 1
+                    msg = f"{platform_id or '?'}: SQLite lock 재시도 초과"
+                    errors.append(msg)
+                    logger.error("카탈로그 동기화 %s", msg)
+                    break
+                delay = min(2.0, _SYNC_LOCK_BACKOFF_SECONDS * (2 ** attempt))
+                logger.warning(
+                    "카탈로그 동기화 SQLite lock [%s/%s] 상품=%s, %.2fs 후 재시도",
+                    attempt + 1,
+                    _SYNC_LOCK_RETRIES,
+                    platform_id or "?",
+                    delay,
+                )
+                time.sleep(delay)
+            except Exception as exc:
+                failed += 1
+                msg = f"{platform_id or '?'}: {exc}"
+                errors.append(msg[:500])
+                logger.exception("카탈로그 상품 동기화 실패 [%s/%s]", platform, platform_id)
+                break
+
+    result = {
+        "ok": failed == 0,
         "total_found": len(items),
-        "created": created,
-        "linked": linked,
-        "updated": updated,
-        "skipped": skipped,
+        **counts,
+        "failed": failed,
     }
+    if errors:
+        result["error"] = "; ".join(errors[:5])
+        result["errors"] = errors[:50]
+    return result
 
 
 def _coupang_item(summary: dict, detail: dict) -> dict:
