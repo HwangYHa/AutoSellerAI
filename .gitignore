@@ -17,11 +17,18 @@ venv/
 .venv/
 env/
 
-# Database
+# Database / runtime state
 *.db
 *.sqlite
 *.sqlite3
-data/*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.lock
+data/
+
+# Generated media / runtime artifacts
+generated/
 
 # IDE
 .vscode/
