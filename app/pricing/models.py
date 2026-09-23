@@ -164,6 +164,56 @@ class PriceRollbackLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
 
+
+class PriceApprovalQueue(Base):
+    __tablename__ = "price_approval_queue"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    product_id: Mapped[int] = mapped_column(Integer, index=True)
+    listing_id: Mapped[int] = mapped_column(Integer, index=True)
+    platform: Mapped[str] = mapped_column(String(30), index=True)
+    platform_id: Mapped[str] = mapped_column(String(200), default="")
+    product_name: Mapped[str] = mapped_column(String(400), default="")
+    supply_price: Mapped[float] = mapped_column(Float, default=0.0)
+    current_price: Mapped[float] = mapped_column(Float, default=0.0)
+    target_price: Mapped[float] = mapped_column(Float, default=0.0)
+    fee_rate: Mapped[float] = mapped_column(Float, default=0.0)
+    current_margin_rate: Mapped[float] = mapped_column(Float, default=0.0)
+    target_margin_rate: Mapped[float] = mapped_column(Float, default=0.0)
+    supply_change_rate: Mapped[float] = mapped_column(Float, default=0.0)
+    risk_level: Mapped[str] = mapped_column(String(20), index=True)
+    reason: Mapped[str] = mapped_column(String(500), default="")
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", index=True)
+    monitor_run_key: Mapped[str] = mapped_column(String(64), default="", index=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_price_approval_listing_status", "listing_id", "status"),
+    )
+
+
+class PriceMonitorRun(Base):
+    __tablename__ = "price_monitor_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    run_key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    checked_count: Mapped[int] = mapped_column(Integer, default=0)
+    queued_count: Mapped[int] = mapped_column(Integer, default=0)
+    critical_count: Mapped[int] = mapped_column(Integer, default=0)
+    warning_count: Mapped[int] = mapped_column(Integer, default=0)
+    blocked_count: Mapped[int] = mapped_column(Integer, default=0)
+    supplier_changed_count: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(30), default="running", index=True)
+    error: Mapped[str] = mapped_column(Text, default="")
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 def ensure_pricing_schema() -> None:
     PricingPolicy.__table__.create(bind=_get_engine(), checkfirst=True)
     CategoryFeeRule.__table__.create(bind=_get_engine(), checkfirst=True)
@@ -174,3 +224,5 @@ def ensure_pricing_schema() -> None:
     PriceChangeBatch.__table__.create(bind=_get_engine(), checkfirst=True)
     PriceChangeBatchItem.__table__.create(bind=_get_engine(), checkfirst=True)
     PriceRollbackLog.__table__.create(bind=_get_engine(), checkfirst=True)
+    PriceApprovalQueue.__table__.create(bind=_get_engine(), checkfirst=True)
+    PriceMonitorRun.__table__.create(bind=_get_engine(), checkfirst=True)
