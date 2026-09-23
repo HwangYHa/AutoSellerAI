@@ -39,6 +39,12 @@ DEFAULT_JOBS: dict[str, dict] = {
         "cron_expr": "0 6 * * *",        # 매일 06:00 KST
         "enabled": False,
     },
+    "price_guard_monitor": {
+        "name": "판매가·마진 안전 감시",
+        "description": "도매가/마켓 현재가 재검증 → 적자·마진미달·원가급등 승인 대기열 + 알림",
+        "cron_expr": "15 */4 * * *",     # 4시간마다 15분
+        "enabled": False,
+    },
     "order_collect": {
         "name": "주문 자동 수집",
         "description": "쿠팡·스마트스토어 신규 주문 수집 → DB 저장 → 텔레그램 알림",
@@ -232,6 +238,42 @@ def job_price_optimize() -> dict:
     return {"checked": len(items), "low_margin": len(low_margin)}
 
 
+def job_price_guard_monitor() -> dict:
+    """도매가와 마켓 현재가를 재검증하고 위험상품을 승인 대기열에만 올린다."""
+    from app.pricing.monitor import run_price_guard_monitor
+    from app.notify.events import notify, NotifyLevel, EventType
+
+    result = run_price_guard_monitor(refresh_supplier_limit=500, live_market_prices=True)
+    if result.get("queued", 0) > 0:
+        highlights = result.get("highlights", [])[:6]
+        lines = []
+        for item in highlights:
+            platform = "쿠팡" if item.get("platform") == "coupang" else "스마트스토어"
+            lines.append(
+                f"• {platform} · {str(item.get('name') or '')[:28]} · "
+                f"마진 {float(item.get('margin') or 0):.1%} · "
+                f"{float(item.get('current_price') or 0):,.0f}→{float(item.get('target_price') or 0):,.0f}원"
+            )
+        try:
+            notify(
+                level=NotifyLevel.CRITICAL if result.get("critical", 0) else NotifyLevel.WARNING,
+                title=(
+                    f"가격 승인 대기 {result.get('queued', 0)}건 "
+                    f"(적자 {result.get('critical', 0)} / 경고 {result.get('warning', 0)})"
+                ),
+                body=(
+                    f"도매가 상승 감지 {result.get('supplier_changed', 0)}건\n"
+                    f"적용 차단 {result.get('blocked', 0)}건\n\n"
+                    + "\n".join(lines)
+                    + "\n\n자동 가격 변경은 실행하지 않았습니다."
+                ),
+                event_type=EventType.PRICE_GUARD,
+            )
+        except Exception:
+            pass
+    return result
+
+
 def job_order_collect() -> dict:
     """쿠팡·스마트스토어 신규 주문 수집 (5분 주기)."""
     from app.pipeline import collect_platform_orders
@@ -422,6 +464,7 @@ JOB_FUNCTIONS: dict[str, callable] = {
     "daily_report":                  job_daily_report,
     "market_refresh":                job_market_refresh,
     "price_optimize":                job_price_optimize,
+    "price_guard_monitor":           job_price_guard_monitor,
     "order_collect":                 job_order_collect,
     "stock_sync":                    job_stock_sync,
     "price_sync":                    job_price_sync,
