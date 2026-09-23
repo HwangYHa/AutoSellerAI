@@ -9,6 +9,15 @@ import pandas as pd
 import streamlit as st
 
 from app.pricing.models import ensure_pricing_schema
+from app.pricing.change_control import (
+    apply_guarded_batch,
+    batch_history,
+    preview_price_changes,
+    rollback_batch,
+    rollback_candidates,
+    rollback_change,
+    rollback_history,
+)
 from app.pricing.supply_monitor import (
     DEFAULT_MAX_SUPPLY_AGE_HOURS,
     classify_price_risk,
@@ -20,8 +29,6 @@ from app.pricing.supply_monitor import (
 )
 from app.pricing.service import (
     PriceRow,
-    apply_many,
-    apply_price,
     get_policy,
     list_fee_rules,
     load_price_rows,
@@ -237,8 +244,58 @@ st.caption(
     "현재 판매가 미확인, 비정상 수수료 상품은 실제 가격 변경에서 자동 제외됩니다."
 )
 
+st.subheader("🧪 변경 전 Preview")
+all_eligible = [x for x in filtered if x.eligible]
+preview_scope = st.radio(
+    "Preview 범위",
+    ["선택 상품", "현재 필터 전체"],
+    horizontal=True,
+    index=0 if selected else 1,
+)
+preview_rows = selected if preview_scope == "선택 상품" else filtered
+preview = preview_price_changes(preview_rows) if preview_rows else {
+    "summary": {"total": 0, "increase": 0, "decrease": 0, "unchanged": 0, "sensitive": 0, "blocked": 0, "sales_history": 0},
+    "items": [],
+    "requires_extra_confirmation": False,
+}
+ps = preview["summary"]
+p1, p2, p3, p4, p5, p6 = st.columns(6)
+p1.metric("Preview 대상", ps["total"])
+p2.metric("인상", ps["increase"])
+p3.metric("인하", ps["decrease"])
+p4.metric("추가승인 필요", ps["sensitive"])
+p5.metric("판매이력 있음", ps["sales_history"])
+p6.metric("적용 차단", ps["blocked"])
+
+if preview["items"]:
+    preview_df = pd.DataFrame([
+        {
+            "판매처": "쿠팡" if x["platform"] == "coupang" else "스마트스토어",
+            "상품명": x["name"],
+            "현재가": int(x["before_price"]),
+            "변경가": int(x["after_price"]),
+            "변경액": int(x["delta"]),
+            "변동률(%)": round(x["change_pct"], 2),
+            "판매이력": x["sales_count"],
+            "보호등급": x["guard_level"],
+            "확인사유": x["guard_reason"],
+        }
+        for x in preview["items"]
+    ])
+    st.dataframe(preview_df, use_container_width=True, hide_index=True)
+
+if preview["requires_extra_confirmation"]:
+    st.warning(
+        "20% 이상 인상, 10% 이상 인하 또는 판매이력 상품의 5% 이상 가격변경이 포함되어 있습니다. "
+        "이 항목들은 일반 승인만으로는 적용되지 않습니다."
+    )
+
 st.subheader("승인 · 적용")
 confirm = st.checkbox("현재가 → 권장가 변경 내용을 확인했고 실제 판매처 가격 수정을 승인합니다.")
+sensitive_confirm = st.checkbox(
+    "급격한 가격변동 및 판매이력 상품도 별도로 확인했고 적용을 승인합니다.",
+    help="20% 이상 인상, 10% 이상 인하, 또는 판매이력 상품의 5% 이상 변경에 대한 추가 승인입니다.",
+)
 
 c1, c2, c3 = st.columns(3)
 with c1:
@@ -248,23 +305,98 @@ with c1:
         format_func=lambda i: f"#{i} · {row_map[i].name[:55]}" if i in row_map else str(i),
     ) if any(x.eligible for x in filtered) else None
     if st.button("이 상품만 적용", use_container_width=True, disabled=not confirm or one_id is None):
-        result = apply_price(row_map[int(one_id)])
-        st.success(f"가격 수정 완료: {result.get('price'):,.0f}원") if result.get("ok") else st.error(result.get("error"))
+        one_rows = [row_map[int(one_id)]]
+        one_preview = preview_price_changes(one_rows)
+        result = apply_guarded_batch(
+            one_rows,
+            mode="single",
+            allow_sensitive=sensitive_confirm,
+        )
+        if result.get("needs_confirmation"):
+            st.error(result["error"])
+        elif result.get("success"):
+            st.success(f"가격 수정 완료 · 배치 {result.get('batch_key', '')[:10]} · 성공 {result['success']}")
+        else:
+            st.error([x.get("error") for x in result.get("results", []) if not x.get("ok")] or result.get("error"))
 with c2:
     if st.button(f"선택 {len(selected)}개 적용", use_container_width=True, disabled=not confirm or not selected):
         with st.spinner("선택 상품 가격을 수정 중입니다..."):
-            result = apply_many(selected)
-        st.success(f"성공 {result['success']} / 실패 {result['failed']}")
-        if result["failed"]:
-            st.error([x.get("error") for x in result["results"] if not x.get("ok")][:10])
+            result = apply_guarded_batch(
+                selected,
+                mode="selected",
+                allow_sensitive=sensitive_confirm,
+            )
+        if result.get("needs_confirmation"):
+            st.error(result["error"])
+        else:
+            st.success(f"성공 {result['success']} / 실패 {result['failed']} / 차단 {result['blocked']} · 배치 {result.get('batch_key', '')[:10]}")
+            if result["failed"] or result["blocked"]:
+                st.error([x.get("error") for x in result["results"] if not x.get("ok")][:10])
 with c3:
-    all_eligible = [x for x in filtered if x.eligible]
     if st.button(f"현재 필터의 적격 {len(all_eligible)}개 전체 적용", use_container_width=True, disabled=not confirm or not all_eligible):
         with st.spinner("전체 적격 상품 가격을 순차 수정 중입니다..."):
-            result = apply_many(all_eligible)
-        st.success(f"성공 {result['success']} / 실패 {result['failed']}")
-        if result["failed"]:
-            st.error([x.get("error") for x in result["results"] if not x.get("ok")][:10])
+            result = apply_guarded_batch(
+                all_eligible,
+                mode="filtered_all",
+                allow_sensitive=sensitive_confirm,
+            )
+        if result.get("needs_confirmation"):
+            st.error(result["error"])
+        else:
+            st.success(f"성공 {result['success']} / 실패 {result['failed']} / 차단 {result['blocked']} · 배치 {result.get('batch_key', '')[:10]}")
+            if result["failed"] or result["blocked"]:
+                st.error([x.get("error") for x in result["results"] if not x.get("ok")][:10])
+
+st.divider()
+st.subheader("↩️ 가격 롤백")
+st.caption(
+    "롤백 직전 판매처의 현재가를 다시 조회합니다. 현재가가 해당 변경의 '변경후 가격'과 다르면 "
+    "판매자센터에서 별도 수정된 것으로 보고 자동 롤백을 차단합니다."
+)
+candidates = rollback_candidates(100)
+if candidates:
+    rollback_df = pd.DataFrame(candidates)
+    st.dataframe(rollback_df, use_container_width=True, hide_index=True)
+    rollback_log_id = st.selectbox(
+        "개별 롤백 대상",
+        [int(x["로그ID"]) for x in candidates],
+        format_func=lambda log_id: next(
+            (
+                f"#{log_id} · {x['판매처']} · {x['상품명'][:45]} · "
+                f"{x['변경후']:,.0f} → {x['변경전']:,.0f}원"
+                for x in candidates if int(x["로그ID"]) == int(log_id)
+            ),
+            str(log_id),
+        ),
+    )
+    rollback_confirm = st.checkbox("선택한 가격 변경을 이전 가격으로 복원하는 것을 승인합니다.")
+    if st.button("선택 변경 롤백", disabled=not rollback_confirm):
+        with st.spinner("현재 판매가를 재확인한 뒤 롤백하는 중입니다..."):
+            rb = rollback_change(int(rollback_log_id))
+        if rb.get("ok"):
+            st.success(f"롤백 완료 · {rb['restored_price']:,.0f}원")
+        else:
+            st.error(rb.get("error"))
+else:
+    st.caption("현재 롤백 가능한 성공 가격변경 이력이 없습니다.")
+
+batches = batch_history(30)
+if batches:
+    with st.expander("배치 전체 롤백"):
+        st.dataframe(pd.DataFrame(batches), use_container_width=True, hide_index=True)
+        rollback_batch_key = st.selectbox("롤백할 배치", [x["배치ID"] for x in batches])
+        batch_rb_confirm = st.checkbox("이 배치에서 성공한 가격변경 전체의 롤백을 승인합니다.")
+        if st.button("배치 롤백 실행", disabled=not batch_rb_confirm):
+            with st.spinner("배치의 각 상품 현재가를 검증하며 롤백 중입니다..."):
+                rb = rollback_batch(str(rollback_batch_key))
+            st.success(f"롤백 성공 {rb['success']} / 실패·차단 {rb['failed']}")
+            if rb["failed"]:
+                st.error([x.get("error") for x in rb["results"] if not x.get("ok")][:10])
+
+rb_history = rollback_history(100)
+if rb_history:
+    with st.expander("롤백 이력"):
+        st.dataframe(pd.DataFrame(rb_history), use_container_width=True, hide_index=True)
 
 st.divider()
 st.subheader("📉 도매가 변동 이력")

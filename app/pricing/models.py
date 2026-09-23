@@ -110,6 +110,60 @@ class PriceRiskSnapshot(Base):
     checked_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
 
+
+class PriceChangeBatch(Base):
+    __tablename__ = "price_change_batches"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    batch_key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    mode: Mapped[str] = mapped_column(String(30), default="selected")
+    total_count: Mapped[int] = mapped_column(Integer, default=0)
+    success_count: Mapped[int] = mapped_column(Integer, default=0)
+    failed_count: Mapped[int] = mapped_column(Integer, default=0)
+    sensitive_count: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(30), default="running", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class PriceChangeBatchItem(Base):
+    __tablename__ = "price_change_batch_items"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    batch_key: Mapped[str] = mapped_column(String(64), index=True)
+    price_change_log_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    product_id: Mapped[int] = mapped_column(Integer, index=True)
+    listing_id: Mapped[int] = mapped_column(Integer, index=True)
+    platform: Mapped[str] = mapped_column(String(30), index=True)
+    platform_id: Mapped[str] = mapped_column(String(200), default="")
+    before_price: Mapped[float] = mapped_column(Float, default=0.0)
+    after_price: Mapped[float] = mapped_column(Float, default=0.0)
+    change_pct: Mapped[float] = mapped_column(Float, default=0.0)
+    sales_count: Mapped[int] = mapped_column(Integer, default=0)
+    guard_level: Mapped[str] = mapped_column(String(30), default="NORMAL", index=True)
+    guard_reason: Mapped[str] = mapped_column(String(500), default="")
+    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    error: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class PriceRollbackLog(Base):
+    __tablename__ = "price_rollback_logs"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    source_change_log_id: Mapped[int] = mapped_column(Integer, index=True)
+    source_batch_key: Mapped[str] = mapped_column(String(64), default="", index=True)
+    product_id: Mapped[int] = mapped_column(Integer, index=True)
+    listing_id: Mapped[int] = mapped_column(Integer, index=True)
+    platform: Mapped[str] = mapped_column(String(30), index=True)
+    platform_id: Mapped[str] = mapped_column(String(200), default="")
+    from_price: Mapped[float] = mapped_column(Float, default=0.0)
+    restored_price: Mapped[float] = mapped_column(Float, default=0.0)
+    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    error: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
 def ensure_pricing_schema() -> None:
     PricingPolicy.__table__.create(bind=_get_engine(), checkfirst=True)
     CategoryFeeRule.__table__.create(bind=_get_engine(), checkfirst=True)
@@ -117,3 +171,6 @@ def ensure_pricing_schema() -> None:
     SupplierProductMap.__table__.create(bind=_get_engine(), checkfirst=True)
     SupplyPriceSnapshot.__table__.create(bind=_get_engine(), checkfirst=True)
     PriceRiskSnapshot.__table__.create(bind=_get_engine(), checkfirst=True)
+    PriceChangeBatch.__table__.create(bind=_get_engine(), checkfirst=True)
+    PriceChangeBatchItem.__table__.create(bind=_get_engine(), checkfirst=True)
+    PriceRollbackLog.__table__.create(bind=_get_engine(), checkfirst=True)
