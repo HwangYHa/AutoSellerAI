@@ -444,6 +444,21 @@ class CoupangUploader:
             if not next_token or not page_items: break
         return results
 
+    def get_current_price(self, seller_product_id: str) -> dict:
+        """Return the live minimum item sale price for rollback/drift checks."""
+        try:
+            current = self.get_seller_product(seller_product_id)
+            prices = [
+                int(item.get("salePrice") or 0)
+                for item in (current.get("items") or [])
+                if int(item.get("salePrice") or 0) > 0
+            ]
+            if not prices:
+                return {"ok": False, "error": "쿠팡 상품의 현재 판매가를 찾지 못했습니다."}
+            return {"ok": True, "price": min(prices)}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
     def update_price(self, seller_product_id: str, price: int) -> dict:
         """Update only item sale prices while preserving the seller product payload."""
         try:
