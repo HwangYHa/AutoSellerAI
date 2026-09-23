@@ -10,8 +10,14 @@ from sqlalchemy import desc
 from app.db import Listing, Order, Product, SupplierRawProduct, SupplierWorkflowItem, get_db
 from app.sqlite_runtime import retry_sqlite_write
 from app.seo.duplicate_detector import _normalize
-from app.pricing.models import CategoryFeeRule, PriceChangeLog, PricingPolicy, ensure_pricing_schema
-from app.pricing.supply_monitor import DEFAULT_MAX_SUPPLY_AGE_HOURS, supplier_mapping_state
+from app.pricing.models import (
+    CategoryFeeRule,
+    PriceChangeLog,
+    PricingPolicy,
+    SupplierProductMap,
+    ensure_pricing_schema,
+)
+from app.pricing.supply_monitor import DEFAULT_MAX_SUPPLY_AGE_HOURS
 
 
 @dataclass
@@ -194,9 +200,28 @@ def list_fee_rules() -> list[dict[str, Any]]:
 
 
 def _resolve_supply_price(db, product: Product) -> tuple[float, str, dict[str, Any]]:
-    mapping = supplier_mapping_state(product.id, max_age_hours=DEFAULT_MAX_SUPPLY_AGE_HOURS)
-    if mapping.get("mapped") and float(mapping.get("price") or 0) > 0:
-        return float(mapping["price"]), str(mapping["source"]), mapping
+    row = db.query(SupplierProductMap).filter_by(product_id=product.id).first()
+    if row is not None:
+        age_hours = None
+        if row.last_refreshed_at:
+            age_hours = max(
+                0.0,
+                (datetime.utcnow() - row.last_refreshed_at).total_seconds() / 3600.0,
+            )
+        mapping = {
+            "mapped": True,
+            "safe": bool(row.verified or row.match_type == "exact_name_unique"),
+            "fresh": age_hours is not None and age_hours <= DEFAULT_MAX_SUPPLY_AGE_HOURS,
+            "age_hours": age_hours,
+            "match_type": row.match_type or "",
+            "supplier_id": row.supplier_id or "",
+            "raw_id": row.raw_id or "",
+            "price": float(row.current_supply_price or 0),
+            "source": f"도매 매핑 · {row.supplier_id} · {row.match_type}",
+            "last_error": row.last_error or "",
+        }
+        if mapping["price"] > 0:
+            return float(mapping["price"]), str(mapping["source"]), mapping
 
     fallback = {
         "mapped": False,
