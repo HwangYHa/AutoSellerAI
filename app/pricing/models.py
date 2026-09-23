@@ -193,14 +193,24 @@ class PriceApprovalQueue(Base):
     )
 
 
+PRICING_TABLES = [
+    PricingPolicy.__table__,
+    CategoryFeeRule.__table__,
+    PriceChangeLog.__table__,
+    SupplierProductMap.__table__,
+    SupplyPriceSnapshot.__table__,
+    PriceRiskSnapshot.__table__,
+    PriceChangeBatch.__table__,
+    PriceChangeBatchItem.__table__,
+    PriceRollbackLog.__table__,
+    PriceApprovalQueue.__table__,
+]
+
+
 def ensure_pricing_schema() -> None:
-    PricingPolicy.__table__.create(bind=_get_engine(), checkfirst=True)
-    CategoryFeeRule.__table__.create(bind=_get_engine(), checkfirst=True)
-    PriceChangeLog.__table__.create(bind=_get_engine(), checkfirst=True)
-    SupplierProductMap.__table__.create(bind=_get_engine(), checkfirst=True)
-    SupplyPriceSnapshot.__table__.create(bind=_get_engine(), checkfirst=True)
-    PriceRiskSnapshot.__table__.create(bind=_get_engine(), checkfirst=True)
-    PriceChangeBatch.__table__.create(bind=_get_engine(), checkfirst=True)
-    PriceChangeBatchItem.__table__.create(bind=_get_engine(), checkfirst=True)
-    PriceRollbackLog.__table__.create(bind=_get_engine(), checkfirst=True)
-    PriceApprovalQueue.__table__.create(bind=_get_engine(), checkfirst=True)
+    """Create pricing tables through the process-wide lock-safe schema path."""
+    Base.metadata.create_all(
+        bind=_get_engine(),
+        tables=PRICING_TABLES,
+        checkfirst=True,
+    )
