@@ -5,7 +5,7 @@ from datetime import datetime
 from sqlalchemy import DateTime, Float, Integer, String, Text, Index
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db import Base, engine
+from app.db import Base, _get_engine
 
 
 class PricingPolicy(Base):
@@ -55,6 +55,6 @@ class PriceChangeLog(Base):
 
 
 def ensure_pricing_schema() -> None:
-    PricingPolicy.__table__.create(bind=engine, checkfirst=True)
-    CategoryFeeRule.__table__.create(bind=engine, checkfirst=True)
-    PriceChangeLog.__table__.create(bind=engine, checkfirst=True)
+    PricingPolicy.__table__.create(bind=_get_engine(), checkfirst=True)
+    CategoryFeeRule.__table__.create(bind=_get_engine(), checkfirst=True)
+    PriceChangeLog.__table__.create(bind=_get_engine(), checkfirst=True)
