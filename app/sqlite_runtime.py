@@ -57,6 +57,7 @@ def is_sqlite_contention_error(exc: BaseException) -> bool:
         or "database table is locked" in text
         or "database schema is locked" in text
         or "database is busy" in text
+        or "database schema has changed" in text
         or ("table " in text and " already exists" in text)
         or ("index " in text and " already exists" in text)
     )
@@ -312,14 +313,28 @@ def _create_all_with_retry(
     tables: Any = None,
     checkfirst: bool = True,
 ) -> None:
-    """Make SQLAlchemy's check-then-create bootstrap tolerant of process races."""
+    """Make schema bootstrap tolerant of concurrent SQLite writers/processes.
+
+    DDL is serialized with the same database-file writer mutex used by ORM
+    flushes. This prevents Streamlit/API/worker startup from racing a table
+    create/check against a long-running application write.
+    """
+    engine = getattr(bind, "engine", bind)
+    database_path = _engine_database_path(engine) if isinstance(engine, Engine) else None
+
     for attempt, delay in enumerate(_SCHEMA_RETRY_DELAYS):
+        lock_fd: int | None = None
         try:
+            if database_path is not None:
+                lock_fd = _acquire_database_file_lock(database_path)
             return _original_create_all(self, bind, tables=tables, checkfirst=checkfirst)
         except OperationalError as exc:
             if not is_sqlite_contention_error(exc) or attempt >= len(_SCHEMA_RETRY_DELAYS) - 1:
                 raise
             time.sleep(delay)
+        finally:
+            if lock_fd is not None:
+                _release_database_file_lock(lock_fd)
     return None
 
 
