@@ -9,6 +9,9 @@ import pandas as pd
 import streamlit as st
 
 from app.pricing.models import ensure_pricing_schema
+from app.pricing.approval_queue import dismiss_approval, list_approval_queue
+from app.os.commerce_automation import get_automation_dashboard, save_scheduler_rule
+from app.os.tasks import enqueue_task
 from app.pricing.change_control import (
     apply_guarded_batch,
     batch_history,
@@ -96,6 +99,76 @@ with st.expander("🧾 카테고리별 수수료 규칙"):
     rules = list_fee_rules()
     if rules:
         st.dataframe(pd.DataFrame(rules), use_container_width=True, hide_index=True)
+
+st.divider()
+st.subheader("⏱️ 정기 가격·마진 감시")
+dashboard = get_automation_dashboard()
+pricing_rule = next((x for x in dashboard["scheduler_rules"] if x["task_type"] == "pricing_watch"), None)
+if pricing_rule:
+    s1, s2, s3 = st.columns([1, 1, 2])
+    watch_enabled = s1.checkbox("정기 감시 활성화", value=bool(pricing_rule["enabled"]))
+    watch_hours = s2.number_input("감시 주기(시간)", min_value=1, max_value=168, value=max(1, int(pricing_rule["interval_minutes"]) // 60))
+    max_supplier_items = s3.number_input(
+        "1회 도매가 최신화 최대 상품수",
+        min_value=50,
+        max_value=5000,
+        value=int((pricing_rule.get("payload") or {}).get("max_supplier_items", 500)),
+        step=50,
+    )
+    a1, a2 = st.columns(2)
+    if a1.button("감시 설정 저장", use_container_width=True):
+        r = save_scheduler_rule(
+            "pricing_watch",
+            int(watch_hours) * 60,
+            enabled=watch_enabled,
+            queue_name="sync",
+            payload={"max_supplier_items": int(max_supplier_items), "live": True},
+            description="도매가·마진 위험 감시 → 승인대기열 + 알림",
+        )
+        st.success("정기 감시 설정을 저장했습니다.") if r.get("ok") else st.error(r.get("error"))
+        if r.get("ok"):
+            st.rerun()
+    if a2.button("지금 감시 실행", type="primary", use_container_width=True):
+        r = enqueue_task(
+            "pricing_watch",
+            {"max_supplier_items": int(max_supplier_items), "live": True},
+            queue_name="sync",
+            dedupe_key="manual:pricing_watch",
+        )
+        st.success(f"가격·마진 감시 작업 #{r['task_id']} 접수") if r.get("ok") else st.error(r.get("error"))
+else:
+    st.warning("pricing_watch 스케줄 규칙이 아직 생성되지 않았습니다. 재배포 후 새로고침하세요.")
+
+pending_queue = list_approval_queue("pending", 500)
+with st.expander(f"🛎️ 가격 승인 대기열 · {len(pending_queue)}건", expanded=bool(pending_queue)):
+    if pending_queue:
+        qdf = pd.DataFrame(pending_queue)
+        st.dataframe(qdf, use_container_width=True, hide_index=True)
+        queue_ids = st.multiselect(
+            "검토할 승인대기 항목",
+            [int(x["대기ID"]) for x in pending_queue],
+            format_func=lambda qid: next(
+                (f"#{qid} · {x['판매처']} · {x['위험']} · {x['상품명'][:50]}" for x in pending_queue if int(x["대기ID"]) == int(qid)),
+                str(qid),
+            ),
+        )
+        q1, q2 = st.columns(2)
+        if q1.button("선택 위험상품 최신 재검증 후 불러오기", disabled=not queue_ids, use_container_width=True):
+            listing_ids = {int(x["listing_id"]) for x in pending_queue if int(x["대기ID"]) in set(queue_ids)}
+            with st.spinner("도매가·마켓 현재가를 다시 확인하는 중입니다..."):
+                latest_rows = load_price_rows(live=True)
+            chosen = [x for x in latest_rows if int(x.listing_id) in listing_ids]
+            st.session_state["pricing_rows"] = [x.to_dict() for x in chosen]
+            st.success(f"{len(chosen)}개 위험상품을 최신 상태로 불러왔습니다. 아래 Preview에서 검토하세요.")
+            st.rerun()
+        if q2.button("선택 항목 대기열에서 제외", disabled=not queue_ids, use_container_width=True):
+            done = sum(1 for qid in queue_ids if dismiss_approval(int(qid)))
+            st.success(f"{done}개 항목을 검토 제외 처리했습니다.")
+            st.rerun()
+    else:
+        st.caption("현재 가격 승인 대기 항목이 없습니다.")
+
+st.info("정기 감시는 도매가·마켓 현재가를 읽고 위험상품을 승인 대기열에 올리며 알림만 전송합니다. 판매가격은 자동 변경하지 않습니다.")
 
 st.divider()
 st.subheader("🔗 도매가 최신화 · 상품 매핑")

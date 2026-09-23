@@ -29,6 +29,7 @@ DEFAULT_JOBS = {
     "settlement_sync": {"default_minutes": 60, "payload": {"days": 7}, "queue": "sync", "description": "판매채널 정산 내역 수집"},
     "catalog_sync": {"default_minutes": 60, "payload": {}, "queue": "sync", "description": "판매상품 동기화"},
     "data_reconcile": {"default_minutes": 30, "payload": {"remote": False}, "queue": "sync", "description": "데이터 관계 정합성 복구"},
+    "pricing_watch": {"default_minutes": 360, "payload": {"max_supplier_items": 500, "live": True}, "queue": "sync", "description": "도매가·마진 위험 감시 → 승인대기열 + 알림", "enabled": False},
 }
 
 # Backward-compatible public name used by existing tests and integrations. Runtime
@@ -59,7 +60,7 @@ def ensure_default_scheduler_rules() -> None:
                 continue
             db.add(OSSchedulerRule(
                 task_type=task_type,
-                enabled=True,
+                enabled=bool(spec.get("enabled", True)),
                 interval_minutes=int(spec["default_minutes"]),
                 queue_name=str(spec["queue"]),
                 payload_json=json.dumps(spec["payload"], ensure_ascii=False),

@@ -31,6 +31,7 @@ TASK_TIMEOUT_SECONDS: dict[str, int] = {
     "inventory_automation": 1800,
     "payment_sync": 1800,
     "data_reconcile": 3600,
+    "pricing_watch": 7200,
     "image_repair": 7200,
     "listing_publish": 1800,
     "supplier_order": 1800,
@@ -134,6 +135,15 @@ def _task_callable(task_type: str) -> Callable[[dict[str, Any]], Any]:
     if task_type == "payment_sync":
         from app.os.payment_orchestrator import sync_payment_sessions
         return lambda payload: sync_payment_sessions(limit=max(1, int(payload.get("limit", 100))))
+
+    if task_type == "pricing_watch":
+        def pricing_watch(payload: dict[str, Any]) -> Any:
+            from app.pricing.watch import run_pricing_watch
+            return run_pricing_watch(
+                max_supplier_items=max(1, int(payload.get("max_supplier_items", 500))),
+                live=bool(payload.get("live", True)),
+            )
+        return pricing_watch
 
     if task_type == "data_reconcile":
         def reconcile(payload: dict[str, Any]) -> Any:

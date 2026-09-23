@@ -42,6 +42,7 @@ controls = [
     ("재고 자동화", "inventory_automation", {"confirmations": 2}, "automation"),
     ("정산", "settlement_sync", {"days": 7}, "sync"),
     ("결제상태", "payment_sync", {"limit": 100}, "automation"),
+    ("가격감시", "pricing_watch", {"max_supplier_items": 500, "live": True}, "sync"),
 ]
 cols = st.columns(len(controls))
 for col, (label, task_type, payload, queue) in zip(cols, controls):

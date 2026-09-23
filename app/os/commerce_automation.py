@@ -500,7 +500,7 @@ def save_scheduler_rule(
     ensure_os_schema(); interval = max(1, int(interval_minutes))
     allowed = {
         "order_sync", "claim_sync", "payment_sync", "fulfillment_cycle", "inquiry_sync",
-        "inventory_automation", "settlement_sync", "catalog_sync", "data_reconcile",
+        "inventory_automation", "settlement_sync", "catalog_sync", "data_reconcile", "pricing_watch",
     }
     if task_type not in allowed:
         return {"ok": False, "error": f"GUI 스케줄에서 허용되지 않는 작업입니다: {task_type}"}

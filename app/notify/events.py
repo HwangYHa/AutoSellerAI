@@ -33,6 +33,7 @@ class EventType(str, Enum):
     # 시스템
     SYSTEM_TEST       = "system_test"
     SYSTEM_ERROR      = "system_error"
+    PRICE_MARGIN_ALERT = "price_margin_alert"
 
 
 _LEVEL_EMOJI = {

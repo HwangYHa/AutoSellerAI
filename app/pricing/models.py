@@ -164,6 +164,35 @@ class PriceRollbackLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
 
+
+class PriceApprovalQueue(Base):
+    __tablename__ = "price_approval_queue"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    product_id: Mapped[int] = mapped_column(Integer, index=True)
+    listing_id: Mapped[int] = mapped_column(Integer, index=True)
+    platform: Mapped[str] = mapped_column(String(30), index=True)
+    platform_id: Mapped[str] = mapped_column(String(200), default="")
+    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    risk_level: Mapped[str] = mapped_column(String(20), index=True)
+    reason: Mapped[str] = mapped_column(String(500), default="")
+    supply_price: Mapped[float] = mapped_column(Float, default=0.0)
+    current_price: Mapped[float] = mapped_column(Float, default=0.0)
+    target_price: Mapped[float] = mapped_column(Float, default=0.0)
+    fee_rate: Mapped[float] = mapped_column(Float, default=0.0)
+    margin_rate: Mapped[float] = mapped_column(Float, default=0.0)
+    detection_count: Mapped[int] = mapped_column(Integer, default=1)
+    first_detected_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    last_detected_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    applied_change_log_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_price_approval_listing_status", "listing_id", "status"),
+    )
+
+
 def ensure_pricing_schema() -> None:
     PricingPolicy.__table__.create(bind=_get_engine(), checkfirst=True)
     CategoryFeeRule.__table__.create(bind=_get_engine(), checkfirst=True)
@@ -174,3 +203,4 @@ def ensure_pricing_schema() -> None:
     PriceChangeBatch.__table__.create(bind=_get_engine(), checkfirst=True)
     PriceChangeBatchItem.__table__.create(bind=_get_engine(), checkfirst=True)
     PriceRollbackLog.__table__.create(bind=_get_engine(), checkfirst=True)
+    PriceApprovalQueue.__table__.create(bind=_get_engine(), checkfirst=True)
