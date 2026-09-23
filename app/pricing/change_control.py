@@ -281,6 +281,11 @@ def apply_guarded_batch(
                 status="success",
                 change_log_id=result.get("change_log_id"),
             )
+            try:
+                from app.pricing.approval_queue import mark_approval_queue_applied
+                mark_approval_queue_applied(row.listing_id, result.get("change_log_id"))
+            except Exception:
+                pass
         else:
             failed += 1
             _update_batch_item(
