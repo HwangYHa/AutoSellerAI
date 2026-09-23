@@ -9,6 +9,15 @@ import pandas as pd
 import streamlit as st
 
 from app.pricing.models import ensure_pricing_schema
+from app.pricing.supply_monitor import (
+    DEFAULT_MAX_SUPPLY_AGE_HOURS,
+    classify_price_risk,
+    list_supplier_mappings,
+    persist_price_risks,
+    rebuild_supplier_mappings,
+    refresh_supplier_prices,
+    supply_price_history,
+)
 from app.pricing.service import (
     PriceRow,
     apply_many,
@@ -82,6 +91,48 @@ with st.expander("🧾 카테고리별 수수료 규칙"):
         st.dataframe(pd.DataFrame(rules), use_container_width=True, hide_index=True)
 
 st.divider()
+st.subheader("🔗 도매가 최신화 · 상품 매핑")
+st.caption(
+    "가격 변경 전에 판매상품을 실제 도매 상품과 연결하고 최신 공급가를 다시 확인합니다. "
+    f"마지막 성공 갱신이 {int(DEFAULT_MAX_SUPPLY_AGE_HOURS)}시간을 넘긴 상품은 가격 변경 대상에서 자동 차단됩니다."
+)
+
+mcol1, mcol2, mcol3 = st.columns([1, 1, 2])
+with mcol1:
+    if st.button("① 상품 매핑 재구축", use_container_width=True):
+        with st.spinner("판매상품과 공급사 상품을 안전하게 매칭하는 중입니다..."):
+            result = rebuild_supplier_mappings()
+        st.session_state["supplier_mapping_result"] = result
+        st.success(
+            f"매칭 {result['matched']} / 미매칭 {result['unmatched']} · "
+            f"신규 {result['created']} / 갱신 {result['updated']}"
+        )
+with mcol2:
+    refresh_limit = st.number_input("이번 갱신 최대 상품수", min_value=1, max_value=5000, value=500, step=50)
+    if st.button("② 매핑된 도매가 최신화", type="primary", use_container_width=True):
+        with st.spinner("공급사 API에서 최신 공급가를 확인하는 중입니다..."):
+            result = refresh_supplier_prices(max_items=int(refresh_limit))
+        st.session_state["supplier_refresh_result"] = result
+        st.success(
+            f"갱신 {result['refreshed']} · 가격변동 {result['changed']} · "
+            f"실패 {result['failed']} · 연동비활성 {result['unavailable']}"
+        )
+        if result.get("errors"):
+            st.warning("\n".join(result["errors"][:8]))
+with mcol3:
+    st.info(
+        "자동 매핑은 ① 공급사 원본 연결, ② 기존 공급사 워크플로우 연결, "
+        "③ 정규화 상품명이 완전히 같고 후보가 1개뿐인 경우까지만 허용합니다. "
+        "유사도(fuzzy) 추정 매칭은 판매가 자동수정에 사용하지 않습니다."
+    )
+
+mapping_rows = list_supplier_mappings()
+with st.expander(f"도매 상품 매핑 현황 · {len(mapping_rows)}개"):
+    if mapping_rows:
+        st.dataframe(pd.DataFrame(mapping_rows), use_container_width=True, hide_index=True)
+    else:
+        st.caption("아직 생성된 도매 상품 매핑이 없습니다.")
+
 left, right = st.columns([1, 3])
 with left:
     live = st.checkbox("마켓 API에서 현재 판매가 새로 읽기", value=True)
@@ -90,7 +141,13 @@ with left:
             try:
                 rows = load_price_rows(live=live)
                 st.session_state["pricing_rows"] = [x.to_dict() for x in rows]
-                st.success(f"{len(rows)}개 판매채널 상품을 불러왔습니다.")
+                risk_counts = persist_price_risks(rows, get_policy().target_margin_rate)
+                st.session_state["pricing_risk_counts"] = risk_counts
+                st.success(
+                    f"{len(rows)}개 판매채널 상품을 불러왔습니다. "
+                    f"긴급 {risk_counts.get('CRITICAL', 0)} · 고위험 {risk_counts.get('HIGH', 0)} · "
+                    f"마진미달 {risk_counts.get('WARNING', 0)} · 차단 {risk_counts.get('BLOCKED', 0)}"
+                )
             except Exception as exc:
                 st.error(f"가격 비교 불러오기 실패: {exc}")
 
@@ -102,13 +159,14 @@ if not raw_rows:
 rows = [PriceRow(**x) for x in raw_rows]
 eligible_count = sum(1 for x in rows if x.eligible)
 missing_cost = sum(1 for x in rows if x.supply_price <= 0)
-risk_count = sum(1 for x in rows if x.eligible and x.current_margin_rate < policy.target_margin_rate)
+risk_count = sum(1 for x in rows if x.current_margin_rate < policy.target_margin_rate and x.supply_price > 0)
+blocked_count = sum(1 for x in rows if not x.eligible)
 
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("전체 판매상품", len(rows))
 m2.metric("가격 수정 가능", eligible_count)
 m3.metric("도매가 미확인", missing_cost)
-m4.metric("목표마진 미달", risk_count)
+m4.metric("목표마진 미달 / 차단", f"{risk_count} / {blocked_count}")
 
 platform_filter = st.multiselect("판매처", ["coupang", "smartstore"], default=["coupang", "smartstore"], format_func=lambda x: "쿠팡" if x == "coupang" else "스마트스토어")
 search = st.text_input("상품 검색", placeholder="상품명 검색")
@@ -123,6 +181,23 @@ filtered = [
 
 table = []
 for x in filtered:
+    risk_level, risk_reason = classify_price_risk(
+        eligible=x.eligible,
+        supply_price=x.supply_price,
+        current_price=x.current_price,
+        margin_rate=x.current_margin_rate,
+        target_margin_rate=policy.target_margin_rate,
+        supply_fresh=x.supply_fresh,
+        supply_safe=x.supply_safe,
+    )
+    risk_label = {
+        "CRITICAL": "🔴 적자",
+        "HIGH": "🔴 고위험",
+        "WARNING": "🟠 목표마진 미달",
+        "OK": "🟢 정상",
+        "REVIEW": "🔵 가격 경쟁력 검토",
+        "BLOCKED": "⚫ 적용 차단",
+    }.get(risk_level, risk_level)
     table.append({
         "선택": False,
         "listing_id": x.listing_id,
@@ -130,6 +205,8 @@ for x in filtered:
         "상품명": x.name,
         "도매가": int(x.supply_price),
         "도매가 출처": x.supply_source,
+        "매핑": x.mapping_type or "-",
+        "도매가 갱신경과(h)": round(x.supply_age_hours, 1) if x.supply_age_hours is not None else None,
         "현재 판매가": int(x.current_price),
         "수수료(%)": round(x.fee_rate * 100, 2),
         "수수료 출처": x.fee_source,
@@ -138,6 +215,8 @@ for x in filtered:
         "변경액": int(x.delta),
         "쿠팡 가드 최저": int(x.auto_floor_price),
         "쿠팡 가드 최고": int(x.auto_ceiling_price),
+        "위험": risk_label,
+        "위험 사유": risk_reason,
         "상태": "수정 가능" if x.eligible else (x.warning or "확인 필요"),
     })
 
@@ -154,8 +233,8 @@ selected_ids = [int(v) for v in edited.loc[edited["선택"] == True, "listing_id
 selected = [row_map[x] for x in selected_ids if x in row_map and row_map[x].eligible]
 
 st.caption(
-    "도매가 미확인, 현재 판매가 미확인, 비정상 수수료 상품은 일괄 변경에서 자동 제외됩니다. "
-    "동일 상품명으로 도매가를 찾은 경우 ‘도매가 출처’에서 확인할 수 있습니다."
+    "도매가 미확인, 안전한 공급사 매핑 없음, 72시간 이상 공급가 미갱신, "
+    "현재 판매가 미확인, 비정상 수수료 상품은 실제 가격 변경에서 자동 제외됩니다."
 )
 
 st.subheader("승인 · 적용")
@@ -186,6 +265,14 @@ with c3:
         st.success(f"성공 {result['success']} / 실패 {result['failed']}")
         if result["failed"]:
             st.error([x.get("error") for x in result["results"] if not x.get("ok")][:10])
+
+st.divider()
+st.subheader("📉 도매가 변동 이력")
+supply_history = supply_price_history(200)
+if supply_history:
+    st.dataframe(pd.DataFrame(supply_history), use_container_width=True, hide_index=True)
+else:
+    st.caption("아직 도매가 갱신 이력이 없습니다.")
 
 st.divider()
 st.subheader("🧾 가격 변경 이력")
