@@ -469,11 +469,11 @@ def load_price_rows(*, live: bool = True) -> list[PriceRow]:
     return rows
 
 
-def _log_change(row: dict[str, Any], status: str, error: str = "") -> None:
+def _log_change(row: dict[str, Any], status: str, error: str = "") -> int:
     ensure_pricing_schema()
-    def _write():
+    def _write() -> int:
         with get_db() as db:
-            db.add(PriceChangeLog(
+            log = PriceChangeLog(
                 product_id=int(row["product_id"]),
                 listing_id=int(row["listing_id"]),
                 platform=str(row["platform"]),
@@ -485,9 +485,12 @@ def _log_change(row: dict[str, Any], status: str, error: str = "") -> None:
                 after_price=float(row["after_price"]),
                 status=status,
                 error=str(error or "")[:1000],
-            ))
+            )
+            db.add(log)
             db.commit()
-    retry_sqlite_write(_write, attempts=8)
+            db.refresh(log)
+            return int(log.id)
+    return retry_sqlite_write(_write, attempts=8)
 
 
 def apply_price(row: PriceRow, new_price: int | None = None) -> dict[str, Any]:
@@ -500,8 +503,8 @@ def apply_price(row: PriceRow, new_price: int | None = None) -> dict[str, Any]:
     }
     if not row.eligible or price <= 0:
         msg = row.warning or "가격 적용 조건을 충족하지 않습니다."
-        _log_change(payload, "skipped", msg)
-        return {"ok": False, "error": msg, "listing_id": row.listing_id}
+        log_id = _log_change(payload, "skipped", msg)
+        return {"ok": False, "error": msg, "listing_id": row.listing_id, "change_log_id": log_id}
 
     # Remote mutation is called exactly once. DB logging may retry independently.
     try:
@@ -517,11 +520,11 @@ def apply_price(row: PriceRow, new_price: int | None = None) -> dict[str, Any]:
         result = {"ok": False, "error": str(exc)}
 
     if result.get("ok"):
-        _log_change(payload, "success")
-        return {"ok": True, "listing_id": row.listing_id, "price": price}
+        log_id = _log_change(payload, "success")
+        return {"ok": True, "listing_id": row.listing_id, "price": price, "change_log_id": log_id}
     error = str(result.get("error") or "가격 수정 실패")
-    _log_change(payload, "failed", error)
-    return {"ok": False, "listing_id": row.listing_id, "error": error}
+    log_id = _log_change(payload, "failed", error)
+    return {"ok": False, "listing_id": row.listing_id, "error": error, "change_log_id": log_id}
 
 
 def apply_many(rows: list[PriceRow]) -> dict[str, Any]:
@@ -540,6 +543,7 @@ def price_change_history(limit: int = 200) -> list[dict[str, Any]]:
         rows = db.query(PriceChangeLog).order_by(desc(PriceChangeLog.created_at)).limit(limit).all()
         return [
             {
+                "로그ID": x.id,
                 "시각": x.created_at,
                 "플랫폼": x.platform,
                 "상품ID": x.product_id,
