@@ -16,14 +16,15 @@ QUEUE_RISK_LEVELS = {"CRITICAL", "HIGH", "WARNING"}
 SUPPLY_CHANGE_ALERT_RATE = 0.10
 
 
-def _latest_supply_change(product_id: int) -> float:
+def _latest_supply_change(product_id: int, *, since: datetime | None = None) -> float:
     with get_db() as db:
-        row = (
-            db.query(SupplyPriceSnapshot)
-            .filter(SupplyPriceSnapshot.product_id == product_id, SupplyPriceSnapshot.status == "changed")
-            .order_by(desc(SupplyPriceSnapshot.checked_at))
-            .first()
+        q = db.query(SupplyPriceSnapshot).filter(
+            SupplyPriceSnapshot.product_id == product_id,
+            SupplyPriceSnapshot.status == "changed",
         )
+        if since is not None:
+            q = q.filter(SupplyPriceSnapshot.checked_at >= since)
+        row = q.order_by(desc(SupplyPriceSnapshot.checked_at)).first()
         return float(row.change_rate or 0) if row else 0.0
 
 
@@ -82,10 +83,11 @@ def run_price_guard_monitor(*, refresh_supplier_limit: int = 500, live_market_pr
     """Refresh cost data, scan margin risk, and enqueue approvals. Never mutates marketplace prices."""
     ensure_pricing_schema()
     run_key = uuid.uuid4().hex
+    run_started_at = datetime.utcnow()
 
     def _start() -> None:
         with get_db() as db:
-            db.add(PriceMonitorRun(run_key=run_key, status="running"))
+            db.add(PriceMonitorRun(run_key=run_key, status="running", started_at=run_started_at))
             db.commit()
     retry_sqlite_write(_start, attempts=8)
 
@@ -111,7 +113,7 @@ def run_price_guard_monitor(*, refresh_supplier_limit: int = 500, live_market_pr
                 supply_fresh=bool(row.supply_fresh),
                 supply_safe=bool(row.supply_safe),
             )
-            change_rate = _latest_supply_change(int(row.product_id))
+            change_rate = _latest_supply_change(int(row.product_id), since=run_started_at)
             if change_rate >= SUPPLY_CHANGE_ALERT_RATE:
                 supplier_changed += 1
 
