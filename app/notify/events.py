@@ -30,6 +30,7 @@ class EventType(str, Enum):
     PO_RECEIVED       = "po_received"
     # 정산·리포트
     DAILY_REPORT      = "daily_report"
+    PRICE_GUARD       = "price_guard"
     # 시스템
     SYSTEM_TEST       = "system_test"
     SYSTEM_ERROR      = "system_error"
