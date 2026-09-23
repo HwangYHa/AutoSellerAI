@@ -444,6 +444,29 @@ class CoupangUploader:
             if not next_token or not page_items: break
         return results
 
+    def update_price(self, seller_product_id: str, price: int) -> dict:
+        """Update only item sale prices while preserving the seller product payload."""
+        try:
+            current = self.get_seller_product(seller_product_id)
+        except Exception as exc:
+            return {"ok": False, "error": f"현재 상품 조회 실패: {exc}"}
+        new_price = max(10, int(price))
+        items = current.get("items") or []
+        if not items:
+            return {"ok": False, "error": "쿠팡 상품에 가격을 수정할 item이 없습니다."}
+        for item in items:
+            item["salePrice"] = new_price
+            original = int(item.get("originalPrice") or 0)
+            if original < new_price:
+                item["originalPrice"] = new_price
+        try:
+            r = self._put("/v2/providers/seller_api/apis/api/v1/marketplace/seller-products", current)
+            if r.status_code in (200, 201):
+                return {"ok": True, "price": new_price}
+            return {"ok": False, "error": f"HTTP {r.status_code}: {r.text[:300]}"}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
     def update_seller_product(self, seller_product_id: str, name: str | None = None, detail_html: str | None = None) -> dict:
         try:
             current = self.get_seller_product(seller_product_id)

@@ -324,15 +324,27 @@ class SmartStoreUploader:
         except Exception as exc: return {"ok": False, "error": str(exc)}
 
     def update_price(self, origin_product_no: str, price: int) -> dict:
+        """Update an origin product sale price using the current Commerce API path."""
         self._ensure_token()
         try:
-            r_get = httpx.get(f"{API}/v2/products/{origin_product_no}", headers=self._headers(), timeout=15)
-            if r_get.status_code != 200: return {"ok": False, "error": f"상품 조회 실패 HTTP {r_get.status_code}"}
-            payload = r_get.json(); payload["originProduct"]["salePrice"] = (price // 10) * 10 or 10
-            r_put = httpx.put(f"{API}/v2/products/{origin_product_no}", headers=self._headers(), json=payload, timeout=30)
-            if r_put.status_code in (200, 201): return {"ok": True}
-            return {"ok": False, "error": f"HTTP {r_put.status_code}: {r_put.text[:200]}"}
-        except Exception as exc: return {"ok": False, "error": str(exc)}
+            current_path = f"{API}/v2/products/origin-products/{origin_product_no}"
+            legacy_path = f"{API}/v2/products/{origin_product_no}"
+            r_get = httpx.get(current_path, headers=self._headers(), timeout=15)
+            use_path = current_path
+            if r_get.status_code == 404:
+                r_get = httpx.get(legacy_path, headers=self._headers(), timeout=15)
+                use_path = legacy_path
+            if r_get.status_code != 200:
+                return {"ok": False, "error": f"상품 조회 실패 HTTP {r_get.status_code}: {r_get.text[:200]}"}
+            payload = r_get.json()
+            origin = payload.get("originProduct") or payload
+            origin["salePrice"] = (max(10, int(price)) // 10) * 10 or 10
+            r_put = httpx.put(use_path, headers=self._headers(), json=payload, timeout=30)
+            if r_put.status_code in (200, 201):
+                return {"ok": True, "price": origin["salePrice"]}
+            return {"ok": False, "error": f"HTTP {r_put.status_code}: {r_put.text[:300]}"}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
 
     def update_product_content(self, origin_product_no: str, name: str | None = None, detail_html: str | None = None) -> dict:
         self._ensure_token()

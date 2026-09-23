@@ -43,6 +43,7 @@ st.sidebar.page_link("pages/13_AI_인물_이미지_스튜디오.py", label="AI �
 st.sidebar.page_link("pages/16_AI_체형_프리셋.py", label="AI 체형 프리셋", icon="🧍")
 st.sidebar.page_link("pages/14_상품_성장_워크플로우.py", label="상품 성장 워크플로우", icon="🚀")
 st.sidebar.page_link("pages/08_마켓_SEO_최적화_안전.py", label="마켓 SEO 최적화", icon="📈")
+st.sidebar.page_link("pages/09_판매가_마진_최적화.py", label="판매가·마진 최적화", icon="💰")
 st.sidebar.page_link("pages/15_AI_캠페인_디렉터.py", label="AI Campaign Director", icon="🧠")
 st.sidebar.page_link("pages/10_Social_Commerce_Threads.py", label="마케팅 · Threads", icon="🧵")
 
