@@ -323,6 +323,26 @@ class SmartStoreUploader:
             return {"ok": False, "error": f"HTTP {r_put.status_code}: {r_put.text[:200]}"}
         except Exception as exc: return {"ok": False, "error": str(exc)}
 
+    def get_current_price(self, origin_product_no: str) -> dict:
+        """Return the live origin-product sale price for rollback/drift checks."""
+        self._ensure_token()
+        try:
+            current_path = f"{API}/v2/products/origin-products/{origin_product_no}"
+            legacy_path = f"{API}/v2/products/{origin_product_no}"
+            r_get = httpx.get(current_path, headers=self._headers(), timeout=15)
+            if r_get.status_code == 404:
+                r_get = httpx.get(legacy_path, headers=self._headers(), timeout=15)
+            if r_get.status_code != 200:
+                return {"ok": False, "error": f"상품 조회 실패 HTTP {r_get.status_code}: {r_get.text[:200]}"}
+            payload = r_get.json()
+            origin = payload.get("originProduct") or payload
+            price = int(origin.get("salePrice") or 0)
+            if price <= 0:
+                return {"ok": False, "error": "스마트스토어 현재 판매가를 찾지 못했습니다."}
+            return {"ok": True, "price": price}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
     def update_price(self, origin_product_no: str, price: int) -> dict:
         """Update an origin product sale price using the current Commerce API path."""
         self._ensure_token()
