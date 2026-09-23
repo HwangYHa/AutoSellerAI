@@ -11,6 +11,7 @@ from app.db import Listing, Order, Product, SupplierRawProduct, SupplierWorkflow
 from app.sqlite_runtime import retry_sqlite_write
 from app.seo.duplicate_detector import _normalize
 from app.pricing.models import CategoryFeeRule, PriceChangeLog, PricingPolicy, ensure_pricing_schema
+from app.pricing.supply_monitor import DEFAULT_MAX_SUPPLY_AGE_HOURS, supplier_mapping_state
 
 
 @dataclass
@@ -24,6 +25,10 @@ class PriceRow:
     category: str
     supply_price: float
     supply_source: str
+    supply_safe: bool
+    supply_fresh: bool
+    supply_age_hours: float | None
+    mapping_type: str
     current_price: float
     fee_rate: float
     fee_source: str
@@ -188,9 +193,26 @@ def list_fee_rules() -> list[dict[str, Any]]:
         ]
 
 
-def _resolve_supply_price(db, product: Product) -> tuple[float, str]:
+def _resolve_supply_price(db, product: Product) -> tuple[float, str, dict[str, Any]]:
+    mapping = supplier_mapping_state(product.id, max_age_hours=DEFAULT_MAX_SUPPLY_AGE_HOURS)
+    if mapping.get("mapped") and float(mapping.get("price") or 0) > 0:
+        return float(mapping["price"]), str(mapping["source"]), mapping
+
+    fallback = {
+        "mapped": False,
+        "safe": False,
+        "fresh": False,
+        "age_hours": None,
+        "match_type": "",
+        "supplier_id": "",
+        "raw_id": "",
+        "price": 0.0,
+        "source": "",
+        "last_error": "",
+    }
+
     if float(product.supply_price or 0) > 0:
-        return float(product.supply_price), f"상품 DB · {product.source}"
+        return float(product.supply_price), f"상품 DB · {product.source} · 최신화 필요", fallback
 
     raw = (
         db.query(SupplierRawProduct)
@@ -199,7 +221,7 @@ def _resolve_supply_price(db, product: Product) -> tuple[float, str]:
         .first()
     )
     if raw:
-        return float(raw.raw_price), f"도매 원본 · {raw.supplier_id}"
+        return float(raw.raw_price), f"도매 원본 · {raw.supplier_id} · 최신화 필요", fallback
 
     workflow = (
         db.query(SupplierWorkflowItem)
@@ -208,7 +230,7 @@ def _resolve_supply_price(db, product: Product) -> tuple[float, str]:
         .first()
     )
     if workflow:
-        return float(workflow.supply_price), f"도매 워크플로우 · {workflow.supplier_id}"
+        return float(workflow.supply_price), f"도매 워크플로우 · {workflow.supplier_id} · 최신화 필요", fallback
 
     key = _normalize(product.name)
     if key:
@@ -217,8 +239,8 @@ def _resolve_supply_price(db, product: Product) -> tuple[float, str]:
             if p.id != product.id and _normalize(p.name) == key
         ]
         if len(candidates) == 1:
-            return float(candidates[0].supply_price), f"동일 상품명 매칭 · {candidates[0].source}"
-    return 0.0, "도매가 미확인"
+            return float(candidates[0].supply_price), f"동일 상품명 후보 · {candidates[0].source} · 매핑 필요", fallback
+    return 0.0, "도매가 미확인", fallback
 
 
 def _resolve_fee_rate(
@@ -266,7 +288,7 @@ def _local_listing_records() -> list[dict[str, Any]]:
             p = db.get(Product, listing.product_id)
             if not p:
                 continue
-            supply, source = _resolve_supply_price(db, p)
+            supply, source, mapping = _resolve_supply_price(db, p)
             out.append({
                 "listing_id": listing.id,
                 "product_id": p.id,
@@ -278,6 +300,10 @@ def _local_listing_records() -> list[dict[str, Any]]:
                 "local_price": float(p.sell_price or 0),
                 "supply_price": supply,
                 "supply_source": source,
+                "supply_safe": bool(mapping.get("safe")),
+                "supply_fresh": bool(mapping.get("fresh")),
+                "supply_age_hours": mapping.get("age_hours"),
+                "mapping_type": str(mapping.get("match_type") or ""),
             })
         return out
 
@@ -378,7 +404,18 @@ def load_price_rows(*, live: bool = True) -> list[PriceRow]:
                 warning = "도매가 미확인"
             elif current_price <= 0:
                 warning = warning or "현재 판매가 미확인"
-            eligible = x["supply_price"] > 0 and current_price > 0 and target > 0 and 0 <= fee < 0.60
+            eligible = (
+                x["supply_price"] > 0
+                and current_price > 0
+                and target > 0
+                and 0 <= fee < 0.60
+                and bool(x.get("supply_safe"))
+                and bool(x.get("supply_fresh"))
+            )
+            if x["supply_price"] > 0 and not x.get("supply_safe"):
+                warning = warning or "도매 상품 매핑 검증 필요"
+            elif x["supply_price"] > 0 and not x.get("supply_fresh"):
+                warning = warning or f"도매가 최신화 필요 ({int(DEFAULT_MAX_SUPPLY_AGE_HOURS)}시간 기준)"
             rows.append(PriceRow(
                 listing_id=x["listing_id"],
                 product_id=x["product_id"],
@@ -389,6 +426,10 @@ def load_price_rows(*, live: bool = True) -> list[PriceRow]:
                 category=category,
                 supply_price=x["supply_price"],
                 supply_source=x["supply_source"],
+                supply_safe=bool(x.get("supply_safe")),
+                supply_fresh=bool(x.get("supply_fresh")),
+                supply_age_hours=x.get("supply_age_hours"),
+                mapping_type=str(x.get("mapping_type") or ""),
                 current_price=current_price,
                 fee_rate=fee,
                 fee_source=fee_source,
