@@ -9,6 +9,13 @@ import pandas as pd
 import streamlit as st
 
 from app.pricing.models import ensure_pricing_schema
+from app.pricing.monitor import (
+    approval_queue,
+    apply_approved_queue,
+    monitor_history,
+    run_price_guard_monitor,
+    set_queue_status,
+)
 from app.pricing.change_control import (
     apply_guarded_batch,
     batch_history,
@@ -158,9 +165,137 @@ with left:
             except Exception as exc:
                 st.error(f"가격 비교 불러오기 실패: {exc}")
 
+st.divider()
+st.subheader("🚨 자동 감시 · 승인 대기열")
+st.caption(
+    "감시는 도매가와 실제 마켓 판매가를 다시 확인해 적자·마진미달·도매가 급등 상품을 "
+    "대기열에 올리고 알림만 보냅니다. 이 단계에서는 쿠팡/네이버 가격을 자동 변경하지 않습니다."
+)
+
+mon1, mon2 = st.columns([1, 2])
+with mon1:
+    if st.button("지금 가격 안전 감시 실행", use_container_width=True):
+        with st.spinner("도매가·마켓 현재가·마진을 재검증하고 있습니다..."):
+            try:
+                result = run_price_guard_monitor(
+                    refresh_supplier_limit=int(refresh_limit),
+                    live_market_prices=True,
+                )
+                st.session_state["last_price_monitor"] = result
+                st.success(
+                    f"점검 {result['checked']} · 승인대기 {result['queued']} "
+                    f"(신규 {result['new_queue_items']}) · 적자 {result['critical']} · "
+                    f"경고 {result['warning']} · 도매가상승 {result['supplier_changed']}"
+                )
+            except Exception as exc:
+                st.error(f"가격 안전 감시 실패: {exc}")
+with mon2:
+    st.info(
+        "정기 실행 작업 ID: price_guard_monitor · 기본 주기: 4시간마다(15분). "
+        "기본값은 비활성화이며 스케줄러 관리 화면에서 활성화할 수 있습니다. "
+        "기존 price_sync는 실제 가격 자동수정 작업이므로 승인형 운영 중에는 비활성 상태를 권장합니다."
+    )
+
+queue_status = st.selectbox(
+    "대기열 상태",
+    ["PENDING", "APPROVED", "REJECTED", "APPLIED", "APPLY_FAILED", "ALL"],
+    format_func=lambda x: {
+        "PENDING": "승인 대기",
+        "APPROVED": "승인됨 · 적용 대기",
+        "REJECTED": "거절",
+        "APPLIED": "적용 완료",
+        "APPLY_FAILED": "적용 실패",
+        "ALL": "전체",
+    }[x],
+)
+queue_rows = approval_queue(queue_status, 500)
+selected_queue_ids: list[int] = []
+
+if queue_rows:
+    queue_table = pd.DataFrame([
+        {"선택": False, **row}
+        for row in queue_rows
+    ])
+    disabled_cols = [x for x in queue_table.columns if x != "선택"]
+    queue_edit = st.data_editor(
+        queue_table,
+        use_container_width=True,
+        hide_index=True,
+        disabled=disabled_cols,
+        column_config={"선택": st.column_config.CheckboxColumn("선택", default=False)},
+        key=f"price_approval_queue_{queue_status}",
+    )
+    selected_queue_ids = [
+        int(v)
+        for v in queue_edit.loc[queue_edit["선택"] == True, "id"].tolist()
+    ]
+
+    q1, q2, q3 = st.columns(3)
+    with q1:
+        if st.button(
+            f"선택 {len(selected_queue_ids)}건 승인",
+            disabled=not selected_queue_ids,
+            use_container_width=True,
+        ):
+            result = set_queue_status(selected_queue_ids, "APPROVED")
+            st.success(f"{result['updated']}건을 승인했습니다. 아직 마켓 가격은 변경하지 않았습니다.")
+            st.rerun()
+    with q2:
+        if st.button(
+            f"선택 {len(selected_queue_ids)}건 거절",
+            disabled=not selected_queue_ids,
+            use_container_width=True,
+        ):
+            result = set_queue_status(selected_queue_ids, "REJECTED")
+            st.success(f"{result['updated']}건을 거절했습니다.")
+            st.rerun()
+    with q3:
+        approved_selected = [
+            int(row["id"])
+            for row in queue_rows
+            if int(row["id"]) in selected_queue_ids and row["상태"] == "APPROVED"
+        ]
+        apply_confirm = st.checkbox(
+            "승인된 선택 항목의 실제 마켓 가격 변경을 최종 승인합니다.",
+            key="approval_queue_apply_confirm",
+        )
+        sensitive_apply = st.checkbox(
+            "민감 가격변동이 포함되어도 추가 확인 후 적용합니다.",
+            key="approval_queue_sensitive_confirm",
+        )
+        if st.button(
+            f"승인된 선택 {len(approved_selected)}건 실제 적용",
+            disabled=not approved_selected or not apply_confirm,
+            type="primary",
+            use_container_width=True,
+        ):
+            with st.spinner("현재 마켓 가격과 안전조건을 다시 검증한 뒤 적용합니다..."):
+                result = apply_approved_queue(
+                    approved_selected,
+                    allow_sensitive=sensitive_apply,
+                )
+            if result.get("needs_confirmation"):
+                st.error(result.get("error"))
+            elif result.get("queue_applied", 0) > 0:
+                st.success(
+                    f"적용 {result.get('queue_applied', 0)} / 실패 {result.get('queue_failed', 0)}"
+                )
+                st.rerun()
+            else:
+                st.error(result.get("error") or "적용된 항목이 없습니다.")
+else:
+    st.caption("현재 선택한 상태의 승인 대기열이 없습니다.")
+
+with st.expander("자동 감시 실행 이력"):
+    mh = monitor_history(50)
+    if mh:
+        st.dataframe(pd.DataFrame(mh), use_container_width=True, hide_index=True)
+    else:
+        st.caption("아직 가격 안전 감시 실행 이력이 없습니다.")
+
 raw_rows = st.session_state.get("pricing_rows", [])
 if not raw_rows:
-    st.info("먼저 ‘도매가 + 마켓 판매가 불러오기’를 실행하세요.")
+    st.info("가격 비교/직접 수정 영역을 사용하려면 ‘도매가 + 마켓 판매가 불러오기’를 실행하세요.")
     st.stop()
 
 rows = [PriceRow(**x) for x in raw_rows]
