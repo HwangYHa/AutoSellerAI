@@ -8,7 +8,13 @@ if (-not (Test-Path ".git")) {
 }
 
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
-    throw "Docker CLI was not found. Start Docker Desktop first."
+    throw "Docker CLI was not found. Install/start Docker Desktop first."
+}
+
+Write-Host "[preflight] Check Docker engine"
+& docker info *> $null
+if ($LASTEXITCODE -ne 0) {
+    throw "Docker Desktop engine is not running. Start Docker Desktop and wait until it shows 'Engine running', then rerun this script."
 }
 
 if (-not (Test-Path ".env")) {
