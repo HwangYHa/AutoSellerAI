@@ -14,11 +14,11 @@ class PricingPolicy(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(80), default="default", unique=True)
     target_margin_rate: Mapped[float] = mapped_column(Float, default=0.36)
-    coupang_fallback_fee_rate: Mapped[float] = mapped_column(Float, default=0.108)
+    coupang_fallback_fee_rate: Mapped[float] = mapped_column(Float, default=0.105)
     smartstore_fallback_fee_rate: Mapped[float] = mapped_column(Float, default=0.06)
     rounding_unit: Mapped[int] = mapped_column(Integer, default=900)
     coupang_auto_down_pct: Mapped[float] = mapped_column(Float, default=5.0)
-    coupang_auto_up_pct: Mapped[float] = mapped_column(Float, default=8.0)
+    coupang_auto_up_pct: Mapped[float] = mapped_column(Float, default=5.0)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
