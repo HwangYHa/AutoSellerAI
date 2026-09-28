@@ -12,6 +12,7 @@ that use ``app.db`` directly and never call Seller OS ``configure_database()``.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 import os
 import threading
 import time
@@ -307,6 +308,34 @@ def _release_writer_lock(session: Session, *_args: Any) -> None:
     _release_database_file_lock(lock_fd)
 
 
+@contextmanager
+def sqlite_writer_guard(session: Session):
+    """Acquire the cross-process SQLite writer mutex before read-modify-write work.
+
+    In WAL mode a transaction that starts with SELECT can fail while upgrading to
+    a writer if another process commits in between. The normal before_flush hook
+    is too late for that pattern because the read snapshot already exists. Use
+    this guard around short read-modify-write transactions so the mutex is held
+    before the first SELECT and remains held through commit or rollback.
+    """
+    if session.info.get(_SESSION_LOCK_KEY) is not None:
+        yield session
+        return
+
+    database_path = _sqlite_database_path(session)
+    if database_path is None:
+        yield session
+        return
+
+    lock_fd = _acquire_database_file_lock(database_path)
+    session.info[_SESSION_LOCK_KEY] = lock_fd
+    try:
+        yield session
+    finally:
+        # after_commit/after_rollback may already have released it.
+        _release_writer_lock(session)
+
+
 def _create_all_with_retry(
     self: MetaData,
     bind: Any,
@@ -364,4 +393,5 @@ __all__ = [
     "install_sqlite_runtime",
     "is_sqlite_contention_error",
     "retry_sqlite_write",
+    "sqlite_writer_guard",
 ]
