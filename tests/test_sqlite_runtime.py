@@ -7,7 +7,7 @@ from sqlalchemy import Integer, String, create_engine, event
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
-from app.sqlite_runtime import ensure_sqlite_wal, is_sqlite_contention_error
+from app.sqlite_runtime import ensure_sqlite_wal, is_sqlite_contention_error, sqlite_writer_guard
 
 
 class _Base(DeclarativeBase):
@@ -180,3 +180,63 @@ def test_writer_serialization_works_across_separate_engines(tmp_path):
 
     assert not errors
     assert second_done.is_set()
+
+
+def test_writer_guard_locks_before_select_for_read_modify_write(tmp_path):
+    """A guarded transaction must own the writer mutex before its first SELECT."""
+    db_path = tmp_path / "guard-before-read.db"
+    engine_a = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    engine_b = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    ensure_sqlite_wal(engine_a)
+    ensure_sqlite_wal(engine_b)
+    _Base.metadata.create_all(engine_a)
+    SessionA = sessionmaker(bind=engine_a, autoflush=False)
+    SessionB = sessionmaker(bind=engine_b, autoflush=False)
+
+    with SessionA() as seed:
+        seed.add(_Row(value="original"))
+        seed.commit()
+
+    first_read = threading.Event()
+    allow_first_commit = threading.Event()
+    second_done = threading.Event()
+    errors: list[BaseException] = []
+
+    def guarded_writer() -> None:
+        try:
+            with SessionA() as db:
+                with sqlite_writer_guard(db):
+                    row = db.query(_Row).first()
+                    assert row is not None
+                    first_read.set()
+                    assert allow_first_commit.wait(timeout=3)
+                    row.value = "guarded"
+                    db.commit()
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    def competing_writer() -> None:
+        try:
+            assert first_read.wait(timeout=3)
+            with SessionB() as db:
+                db.add(_Row(value="competitor"))
+                db.commit()
+            second_done.set()
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    t1 = threading.Thread(target=guarded_writer)
+    t2 = threading.Thread(target=competing_writer)
+    t1.start()
+    t2.start()
+
+    assert first_read.wait(timeout=3)
+    time.sleep(0.1)
+    assert not second_done.is_set()
+    allow_first_commit.set()
+    t1.join(timeout=3)
+    t2.join(timeout=3)
+
+    assert not errors
+    assert second_done.is_set()
+
