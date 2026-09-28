@@ -8,7 +8,7 @@ from typing import Any
 from sqlalchemy import desc
 
 from app.db import Listing, Order, Product, SupplierRawProduct, SupplierWorkflowItem, get_db
-from app.sqlite_runtime import retry_sqlite_write
+from app.sqlite_runtime import retry_sqlite_write, sqlite_writer_guard
 from app.seo.duplicate_detector import _normalize
 from app.pricing.models import (
     CategoryFeeRule,
@@ -125,12 +125,15 @@ def get_policy() -> PricingPolicy:
             return row
     def _create():
         with get_db() as db:
-            row = PricingPolicy(name="default")
-            db.add(row)
-            db.commit()
-            db.refresh(row)
-            db.expunge(row)
-            return row
+            with sqlite_writer_guard(db):
+                row = db.query(PricingPolicy).filter_by(name="default").first()
+                if row is None:
+                    row = PricingPolicy(name="default")
+                    db.add(row)
+                    db.commit()
+                    db.refresh(row)
+                db.expunge(row)
+                return row
     return retry_sqlite_write(_create, attempts=8)
 
 
@@ -146,15 +149,16 @@ def save_policy(
     ensure_pricing_schema()
     def _write():
         with get_db() as db:
-            row = db.query(PricingPolicy).filter_by(name="default").first() or PricingPolicy(name="default")
-            row.target_margin_rate = _safe_rate(target_margin_rate, 0.36)
-            row.coupang_fallback_fee_rate = _safe_rate(coupang_fallback_fee_rate, 0.108)
-            row.smartstore_fallback_fee_rate = _safe_rate(smartstore_fallback_fee_rate, 0.06)
-            row.rounding_unit = int(rounding_unit)
-            row.coupang_auto_down_pct = max(0.0, float(coupang_auto_down_pct))
-            row.coupang_auto_up_pct = max(0.0, float(coupang_auto_up_pct))
-            db.add(row)
-            db.commit()
+            with sqlite_writer_guard(db):
+                row = db.query(PricingPolicy).filter_by(name="default").first() or PricingPolicy(name="default")
+                row.target_margin_rate = _safe_rate(target_margin_rate, 0.36)
+                row.coupang_fallback_fee_rate = _safe_rate(coupang_fallback_fee_rate, 0.105)
+                row.smartstore_fallback_fee_rate = _safe_rate(smartstore_fallback_fee_rate, 0.06)
+                row.rounding_unit = int(rounding_unit)
+                row.coupang_auto_down_pct = max(0.0, float(coupang_auto_down_pct))
+                row.coupang_auto_up_pct = max(0.0, float(coupang_auto_up_pct))
+                db.add(row)
+                db.commit()
     retry_sqlite_write(_write, attempts=8)
 
 
@@ -167,19 +171,20 @@ def save_fee_rule(platform: str, category_key: str, fee_rate: float, note: str =
         raise ValueError("플랫폼, 카테고리, 0~60% 미만 수수료율이 필요합니다.")
     def _write():
         with get_db() as db:
-            row = (
-                db.query(CategoryFeeRule)
-                .filter_by(platform=platform, category_key=category_key)
-                .order_by(desc(CategoryFeeRule.updated_at))
-                .first()
-            )
-            if not row:
-                row = CategoryFeeRule(platform=platform, category_key=category_key)
-            row.fee_rate = rate
-            row.note = str(note or "")[:300]
-            row.source = "manual"
-            db.add(row)
-            db.commit()
+            with sqlite_writer_guard(db):
+                row = (
+                    db.query(CategoryFeeRule)
+                    .filter_by(platform=platform, category_key=category_key)
+                    .order_by(desc(CategoryFeeRule.updated_at))
+                    .first()
+                )
+                if not row:
+                    row = CategoryFeeRule(platform=platform, category_key=category_key)
+                row.fee_rate = rate
+                row.note = str(note or "")[:300]
+                row.source = "manual"
+                db.add(row)
+                db.commit()
     retry_sqlite_write(_write, attempts=8)
 
 
