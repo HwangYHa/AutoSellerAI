@@ -342,23 +342,22 @@ def _record_rollback(
         with get_db() as db:
             with sqlite_writer_guard(db):
                 log = PriceRollbackLog(
-                source_change_log_id=int(source.id),
-                source_batch_key=source_batch_key,
-                product_id=int(source.product_id),
-                listing_id=int(source.listing_id),
-                platform=str(source.platform),
-                platform_id=str(source.platform_id),
-                from_price=float(source.after_price or 0),
-                restored_price=float(source.before_price or 0),
-                status=status,
-                error=str(error or "")[:1000],
-            )
+                    source_change_log_id=int(source.id),
+                    source_batch_key=source_batch_key,
+                    product_id=int(source.product_id),
+                    listing_id=int(source.listing_id),
+                    platform=str(source.platform),
+                    platform_id=str(source.platform_id),
+                    from_price=float(source.after_price or 0),
+                    restored_price=float(source.before_price or 0),
+                    status=status,
+                    error=str(error or "")[:1000],
+                )
                 db.add(log)
                 db.commit()
                 return int(log.id)
 
     return retry_sqlite_write(_write, attempts=8)
-
 
 def rollback_change(change_log_id: int) -> dict[str, Any]:
     ensure_pricing_schema()
