@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Any
 
 from app.db import get_db
+from app.sqlite_runtime import retry_sqlite_write, sqlite_writer_guard
 from app.os.approvals import execute_idempotent
 from app.os.commerce_automation_models import (
     OSChannelSettlement,
@@ -504,18 +505,23 @@ def save_scheduler_rule(
     }
     if task_type not in allowed:
         return {"ok": False, "error": f"GUI 스케줄에서 허용되지 않는 작업입니다: {task_type}"}
-    with get_db() as db:
-        row = db.query(OSSchedulerRule).filter_by(task_type=task_type).first()
-        if not row:
-            row = OSSchedulerRule(task_type=task_type)
-            db.add(row)
-        row.enabled = bool(enabled)
-        row.interval_minutes = interval
-        row.queue_name = str(queue_name or "sync")[:40]
-        row.payload_json = _dump(payload or {})
-        row.description = str(description)[:400]
-        db.commit(); db.refresh(row)
-        return {"ok": True, "rule_id": row.id}
+    def _write() -> dict[str, Any]:
+        with get_db() as db:
+            with sqlite_writer_guard(db):
+                row = db.query(OSSchedulerRule).filter_by(task_type=task_type).first()
+                if not row:
+                    row = OSSchedulerRule(task_type=task_type)
+                    db.add(row)
+                row.enabled = bool(enabled)
+                row.interval_minutes = interval
+                row.queue_name = str(queue_name or "sync")[:40]
+                row.payload_json = _dump(payload or {})
+                row.description = str(description)[:400]
+                db.commit()
+                rule_id = int(row.id)
+                return {"ok": True, "rule_id": rule_id}
+
+    return retry_sqlite_write(_write, attempts=8)
 
 
 def get_automation_dashboard() -> dict[str, Any]:
