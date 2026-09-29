@@ -91,3 +91,10 @@ def test_supplier_order_executor_rechecks_claim_hold_before_side_effect():
     source = inspect.getsource(fulfillment_executor.execute_supplier_order)
     assert "ORDER_BLOCKED_BY_CLAIM_OR_HOLD" in source
     assert "immediately before the first supplier side" in source
+
+
+def test_scheduler_rule_write_is_serialized_and_retried_on_sqlite():
+    source = inspect.getsource(commerce_automation.save_scheduler_rule)
+    assert "sqlite_writer_guard" in source
+    assert "retry_sqlite_write" in source
+    assert "attempts=8" in source
