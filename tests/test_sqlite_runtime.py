@@ -240,3 +240,55 @@ def test_writer_guard_locks_before_select_for_read_modify_write(tmp_path):
     assert not errors
     assert second_done.is_set()
 
+
+
+def test_writer_guard_starts_begin_immediate_before_reads(tmp_path):
+    db_path = tmp_path / "begin-immediate.db"
+    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    ensure_sqlite_wal(engine)
+    _Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine, autoflush=False)
+
+    statements: list[str] = []
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+        statements.append(" ".join(str(statement).strip().upper().split()))
+
+    with SessionLocal() as db:
+        with sqlite_writer_guard(db):
+            assert db.query(_Row).count() == 0
+            db.add(_Row(value="reserved"))
+            db.commit()
+
+    begin_index = next(i for i, statement in enumerate(statements) if statement == "BEGIN IMMEDIATE")
+    select_index = next(i for i, statement in enumerate(statements) if statement.startswith("SELECT"))
+    assert begin_index < select_index
+
+
+def test_writer_lock_uses_redis_when_available_and_releases_it(tmp_path, monkeypatch):
+    import app.sqlite_runtime as runtime
+
+    class FakeRedisLock:
+        def __init__(self):
+            self.acquired = False
+            self.released = False
+
+        def acquire(self, blocking=True):
+            assert blocking is True
+            self.acquired = True
+            return True
+
+        def owned(self):
+            return self.acquired and not self.released
+
+        def release(self):
+            self.released = True
+
+    fake_lock = FakeRedisLock()
+    monkeypatch.setattr(runtime, "_redis_writer_lock", lambda _path: fake_lock)
+
+    handle = runtime._acquire_database_file_lock(tmp_path / "redis-lock.db")
+    assert fake_lock.acquired is True
+    runtime._release_database_file_lock(handle)
+    assert fake_lock.released is True
