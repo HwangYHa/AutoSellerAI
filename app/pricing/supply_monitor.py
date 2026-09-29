@@ -212,7 +212,7 @@ def _mapping_candidate_for_product(db, product: Product) -> MappingCandidate | N
     candidate = candidates[0]
     return MappingCandidate(
         product_id=product.id,
-        supplier_id=str(candidate.source).strip().lower(),
+        supplier_id=_safe_supplier_source(candidate.source),
         raw_id=str(candidate.source_id).strip(),
         match_type="exact_name_unique",
         confidence=0.95,
@@ -302,23 +302,24 @@ def rebuild_supplier_mappings() -> dict[str, Any]:
 def _record_refresh_failure(map_id: int, product_id: int, supplier_id: str, raw_id: str, error: str) -> None:
     def _write() -> None:
         with get_db() as db:
-            row = db.get(SupplierProductMap, map_id)
-            if row:
-                row.last_error = str(error or "")[:1000]
-                db.add(row)
-            db.add(
-                SupplyPriceSnapshot(
-                    product_id=product_id,
-                    supplier_id=supplier_id,
-                    raw_id=raw_id,
-                    old_price=float(row.current_supply_price or 0) if row else 0.0,
-                    new_price=0.0,
-                    change_rate=0.0,
-                    status="failed",
-                    error=str(error or "")[:1000],
+            with sqlite_writer_guard(db):
+                row = db.get(SupplierProductMap, map_id)
+                if row:
+                    row.last_error = str(error or "")[:1000]
+                    db.add(row)
+                db.add(
+                    SupplyPriceSnapshot(
+                        product_id=product_id,
+                        supplier_id=supplier_id,
+                        raw_id=raw_id,
+                        old_price=float(row.current_supply_price or 0) if row else 0.0,
+                        new_price=0.0,
+                        change_rate=0.0,
+                        status="failed",
+                        error=str(error or "")[:1000],
+                    )
                 )
-            )
-            db.commit()
+                db.commit()
     retry_sqlite_write(_write, attempts=8)
 
 
@@ -386,64 +387,65 @@ def refresh_supplier_prices(*, max_items: int = 500) -> dict[str, Any]:
 
         def _write_refresh() -> tuple[float, float]:
             with get_db() as db:
-                row = db.get(SupplierProductMap, mapping["id"])
-                product = db.get(Product, mapping["product_id"])
-                if row is None or product is None:
-                    raise ValueError("매핑 또는 상품이 삭제되었습니다.")
+                with sqlite_writer_guard(db):
+                    row = db.get(SupplierProductMap, mapping["id"])
+                    product = db.get(Product, mapping["product_id"])
+                    if row is None or product is None:
+                        raise ValueError("매핑 또는 상품이 삭제되었습니다.")
 
-                old_price = float(row.current_supply_price or product.supply_price or 0)
-                change_rate = ((new_price - old_price) / old_price) if old_price > 0 else 0.0
+                    old_price = float(row.current_supply_price or product.supply_price or 0)
+                    change_rate = ((new_price - old_price) / old_price) if old_price > 0 else 0.0
 
-                row.previous_supply_price = old_price
-                row.current_supply_price = new_price
-                row.last_refreshed_at = observed_at or _utcnow()
-                row.last_error = ""
+                    row.previous_supply_price = old_price
+                    row.current_supply_price = new_price
+                    row.last_refreshed_at = observed_at or _utcnow()
+                    row.last_error = ""
 
-                # Canonical product supply price is refreshed from the durable supplier mapping.
-                product.supply_price = new_price
+                    # Canonical product supply price is refreshed from the durable supplier mapping.
+                    product.supply_price = new_price
 
-                raw = (
-                    db.query(SupplierRawProduct)
-                    .filter_by(
-                        supplier_id=mapping["supplier_id"],
-                        raw_id=mapping["raw_id"],
+                    raw = (
+                        db.query(SupplierRawProduct)
+                        .filter_by(
+                            supplier_id=mapping["supplier_id"],
+                            raw_id=mapping["raw_id"],
+                        )
+                        .order_by(desc(SupplierRawProduct.updated_at))
+                        .first()
                     )
-                    .order_by(desc(SupplierRawProduct.updated_at))
-                    .first()
-                )
-                if raw and not used_cached_price:
-                    raw.raw_price = new_price
-                    raw.updated_at = observed_at or _utcnow()
+                    if raw and not used_cached_price:
+                        raw.raw_price = new_price
+                        raw.updated_at = observed_at or _utcnow()
 
-                workflow = (
-                    db.query(SupplierWorkflowItem)
-                    .filter_by(
-                        supplier_id=mapping["supplier_id"],
-                        raw_id=mapping["raw_id"],
+                    workflow = (
+                        db.query(SupplierWorkflowItem)
+                        .filter_by(
+                            supplier_id=mapping["supplier_id"],
+                            raw_id=mapping["raw_id"],
+                        )
+                        .order_by(desc(SupplierWorkflowItem.updated_at))
+                        .first()
                     )
-                    .order_by(desc(SupplierWorkflowItem.updated_at))
-                    .first()
-                )
-                if workflow:
-                    workflow.supply_price = new_price
+                    if workflow:
+                        workflow.supply_price = new_price
 
-                db.add(
-                    SupplyPriceSnapshot(
-                        product_id=product.id,
-                        supplier_id=mapping["supplier_id"],
-                        raw_id=mapping["raw_id"],
-                        old_price=old_price,
-                        new_price=new_price,
-                        change_rate=change_rate,
-                        status=(
-                            "cached"
-                            if used_cached_price
-                            else ("changed" if abs(new_price - old_price) >= 1 else "unchanged")
-                        ),
+                    db.add(
+                        SupplyPriceSnapshot(
+                            product_id=product.id,
+                            supplier_id=mapping["supplier_id"],
+                            raw_id=mapping["raw_id"],
+                            old_price=old_price,
+                            new_price=new_price,
+                            change_rate=change_rate,
+                            status=(
+                                "cached"
+                                if used_cached_price
+                                else ("changed" if abs(new_price - old_price) >= 1 else "unchanged")
+                            ),
+                        )
                     )
-                )
-                db.commit()
-                return old_price, change_rate
+                    db.commit()
+                    return old_price, change_rate
 
         try:
             old_price, change_rate = retry_sqlite_write(_write_refresh, attempts=8)
