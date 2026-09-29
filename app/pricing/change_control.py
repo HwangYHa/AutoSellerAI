@@ -5,6 +5,7 @@ from dataclasses import dataclass, asdict
 from typing import Any
 
 from sqlalchemy import desc, func
+from sqlalchemy.exc import OperationalError
 
 from app.db import Order, PlatformOrder, Product, get_db
 from app.pricing.models import (
@@ -14,7 +15,7 @@ from app.pricing.models import (
     PriceRollbackLog,
     ensure_pricing_schema,
 )
-from app.sqlite_runtime import retry_sqlite_write
+from app.sqlite_runtime import retry_sqlite_write, sqlite_writer_guard
 
 
 DEFAULT_UP_THRESHOLD_PCT = 20.0
@@ -153,38 +154,38 @@ def _create_batch(preview: dict[str, Any], mode: str) -> str:
 
     def _write() -> None:
         with get_db() as db:
-            db.add(
-                PriceChangeBatch(
-                    batch_key=batch_key,
-                    mode=str(mode or "selected")[:30],
-                    total_count=int(summary["total"]),
-                    sensitive_count=int(summary["sensitive"]),
-                    status="running",
-                )
-            )
-            for item in preview["items"]:
+            with sqlite_writer_guard(db):
                 db.add(
-                    PriceChangeBatchItem(
+                    PriceChangeBatch(
                         batch_key=batch_key,
-                        product_id=int(item["product_id"]),
-                        listing_id=int(item["listing_id"]),
-                        platform=str(item["platform"]),
-                        platform_id=str(item["platform_id"]),
-                        before_price=float(item["before_price"]),
-                        after_price=float(item["after_price"]),
-                        change_pct=float(item["change_pct"]),
-                        sales_count=int(item["sales_count"]),
-                        guard_level=str(item["guard_level"]),
-                        guard_reason=str(item["guard_reason"])[:500],
-                        status="blocked" if item["guard_level"] == "BLOCKED" else "pending",
-                        error=str(item["guard_reason"])[:1000] if item["guard_level"] == "BLOCKED" else "",
+                        mode=str(mode or "selected")[:30],
+                        total_count=int(summary["total"]),
+                        sensitive_count=int(summary["sensitive"]),
+                        status="running",
                     )
                 )
-            db.commit()
+                for item in preview["items"]:
+                    db.add(
+                        PriceChangeBatchItem(
+                            batch_key=batch_key,
+                            product_id=int(item["product_id"]),
+                            listing_id=int(item["listing_id"]),
+                            platform=str(item["platform"]),
+                            platform_id=str(item["platform_id"]),
+                            before_price=float(item["before_price"]),
+                            after_price=float(item["after_price"]),
+                            change_pct=float(item["change_pct"]),
+                            sales_count=int(item["sales_count"]),
+                            guard_level=str(item["guard_level"]),
+                            guard_reason=str(item["guard_reason"])[:500],
+                            status="blocked" if item["guard_level"] == "BLOCKED" else "pending",
+                            error=str(item["guard_reason"])[:1000] if item["guard_level"] == "BLOCKED" else "",
+                        )
+                    )
+                db.commit()
 
     retry_sqlite_write(_write, attempts=8)
     return batch_key
-
 
 def _update_batch_item(
     batch_key: str,
@@ -196,17 +197,18 @@ def _update_batch_item(
 ) -> None:
     def _write() -> None:
         with get_db() as db:
-            item = (
-                db.query(PriceChangeBatchItem)
-                .filter_by(batch_key=batch_key, listing_id=int(listing_id))
-                .first()
-            )
-            if item:
-                item.status = status
-                item.price_change_log_id = change_log_id
-                item.error = str(error or "")[:1000]
-                db.add(item)
-            db.commit()
+            with sqlite_writer_guard(db):
+                item = (
+                    db.query(PriceChangeBatchItem)
+                    .filter_by(batch_key=batch_key, listing_id=int(listing_id))
+                    .first()
+                )
+                if item:
+                    item.status = status
+                    item.price_change_log_id = change_log_id
+                    item.error = str(error or "")[:1000]
+                    db.add(item)
+                db.commit()
 
     retry_sqlite_write(_write, attempts=8)
 
@@ -216,14 +218,15 @@ def _finish_batch(batch_key: str, success: int, failed: int) -> None:
 
     def _write() -> None:
         with get_db() as db:
-            batch = db.query(PriceChangeBatch).filter_by(batch_key=batch_key).first()
-            if batch:
-                batch.success_count = int(success)
-                batch.failed_count = int(failed)
-                batch.status = "completed" if failed == 0 else "partial"
-                batch.finished_at = datetime.utcnow()
-                db.add(batch)
-            db.commit()
+            with sqlite_writer_guard(db):
+                batch = db.query(PriceChangeBatch).filter_by(batch_key=batch_key).first()
+                if batch:
+                    batch.success_count = int(success)
+                    batch.failed_count = int(failed)
+                    batch.status = "completed" if failed == 0 else "partial"
+                    batch.finished_at = datetime.utcnow()
+                    db.add(batch)
+                db.commit()
 
     retry_sqlite_write(_write, attempts=8)
 
@@ -245,7 +248,28 @@ def apply_guarded_batch(
             "error": "급격한 가격변동 또는 판매이력 상품이 포함되어 추가 승인이 필요합니다.",
         }
 
-    batch_key = _create_batch(preview, mode)
+    try:
+        batch_key = _create_batch(preview, mode)
+    except OperationalError as exc:
+        return {
+            "ok": False,
+            "needs_confirmation": False,
+            "batch_key": "",
+            "total": len(rows),
+            "success": 0,
+            "failed": len(rows),
+            "blocked": 0,
+            "results": [
+                {
+                    "ok": False,
+                    "listing_id": int(getattr(row, "listing_id", 0) or 0),
+                    "error": "가격 변경 배치 저장 중 DB 쓰기 경합이 해소되지 않았습니다. 잠시 후 다시 실행하세요.",
+                }
+                for row in rows
+            ],
+            "preview": preview,
+            "error": f"가격 변경 배치 생성 실패: {exc}",
+        }
     item_meta = {int(x["listing_id"]): x for x in preview["items"]}
     success = failed = blocked = 0
     results: list[dict[str, Any]] = []
@@ -338,25 +362,24 @@ def _record_rollback(
 ) -> int:
     def _write() -> int:
         with get_db() as db:
-            log = PriceRollbackLog(
-                source_change_log_id=int(source.id),
-                source_batch_key=source_batch_key,
-                product_id=int(source.product_id),
-                listing_id=int(source.listing_id),
-                platform=str(source.platform),
-                platform_id=str(source.platform_id),
-                from_price=float(source.after_price or 0),
-                restored_price=float(source.before_price or 0),
-                status=status,
-                error=str(error or "")[:1000],
-            )
-            db.add(log)
-            db.commit()
-            db.refresh(log)
-            return int(log.id)
+            with sqlite_writer_guard(db):
+                log = PriceRollbackLog(
+                    source_change_log_id=int(source.id),
+                    source_batch_key=source_batch_key,
+                    product_id=int(source.product_id),
+                    listing_id=int(source.listing_id),
+                    platform=str(source.platform),
+                    platform_id=str(source.platform_id),
+                    from_price=float(source.after_price or 0),
+                    restored_price=float(source.before_price or 0),
+                    status=status,
+                    error=str(error or "")[:1000],
+                )
+                db.add(log)
+                db.commit()
+                return int(log.id)
 
     return retry_sqlite_write(_write, attempts=8)
-
 
 def rollback_change(change_log_id: int) -> dict[str, Any]:
     ensure_pricing_schema()
