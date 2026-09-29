@@ -1,4 +1,18 @@
 services:
+  db-bootstrap:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: autoseller-db-bootstrap
+    command: ["python", "scripts/bootstrap_sqlite_volume.py"]
+    volumes:
+      - ./data:/legacy:ro
+      - sqlite-data:/app/sqlite
+    environment:
+      LEGACY_DB_PATH: /legacy/autoseller.db
+      TARGET_DB_PATH: /app/sqlite/autoseller.db
+    restart: "no"
+
   autoseller:
     build:
       context: .
@@ -8,15 +22,19 @@ services:
       - "8501:8501"
     volumes:
       - ./data:/app/data
+      - sqlite-data:/app/sqlite
     env_file:
       - path: .env
         required: false
     environment:
+      DB_PATH: /app/sqlite/autoseller.db
       REDIS_URL: redis://redis:6379/0
       SD_WEBUI_URL: ${SD_WEBUI_DOCKER_URL:-http://host.docker.internal:7860}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
+      db-bootstrap:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     restart: unless-stopped
@@ -37,12 +55,16 @@ services:
       - "127.0.0.1:8001:8001"
     volumes:
       - ./data:/app/data
+      - sqlite-data:/app/sqlite
     env_file:
       - path: .env
         required: false
     environment:
+      DB_PATH: /app/sqlite/autoseller.db
       REDIS_URL: redis://redis:6379/0
     depends_on:
+      db-bootstrap:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     restart: unless-stopped
@@ -61,12 +83,16 @@ services:
     command: ["rq", "worker", "sync", "automation", "--url", "redis://redis:6379/0"]
     volumes:
       - ./data:/app/data
+      - sqlite-data:/app/sqlite
     env_file:
       - path: .env
         required: false
     environment:
+      DB_PATH: /app/sqlite/autoseller.db
       REDIS_URL: redis://redis:6379/0
     depends_on:
+      db-bootstrap:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     restart: unless-stopped
@@ -79,15 +105,19 @@ services:
     command: ["rq", "worker", "image", "--url", "redis://redis:6379/0"]
     volumes:
       - ./data:/app/data
+      - sqlite-data:/app/sqlite
     env_file:
       - path: .env
         required: false
     environment:
+      DB_PATH: /app/sqlite/autoseller.db
       REDIS_URL: redis://redis:6379/0
       SD_WEBUI_URL: ${SD_WEBUI_DOCKER_URL:-http://host.docker.internal:7860}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
+      db-bootstrap:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     restart: unless-stopped
@@ -100,12 +130,16 @@ services:
     command: ["rq", "worker", "dangerous", "--url", "redis://redis:6379/0"]
     volumes:
       - ./data:/app/data
+      - sqlite-data:/app/sqlite
     env_file:
       - path: .env
         required: false
     environment:
+      DB_PATH: /app/sqlite/autoseller.db
       REDIS_URL: redis://redis:6379/0
     depends_on:
+      db-bootstrap:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     restart: unless-stopped
@@ -118,12 +152,16 @@ services:
     command: ["python", "-m", "app.os.scheduler"]
     volumes:
       - ./data:/app/data
+      - sqlite-data:/app/sqlite
     env_file:
       - path: .env
         required: false
     environment:
+      DB_PATH: /app/sqlite/autoseller.db
       REDIS_URL: redis://redis:6379/0
     depends_on:
+      db-bootstrap:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     restart: unless-stopped
@@ -138,12 +176,16 @@ services:
       - "8000:8000"
     volumes:
       - ./data:/app/data
+      - sqlite-data:/app/sqlite
     env_file:
       - path: .env
         required: false
     environment:
+      DB_PATH: /app/sqlite/autoseller.db
       REDIS_URL: redis://redis:6379/0
     depends_on:
+      db-bootstrap:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     restart: unless-stopped
@@ -176,12 +218,16 @@ services:
     command: ["rq", "worker", "threads", "--url", "redis://redis:6379/0"]
     volumes:
       - ./data:/app/data
+      - sqlite-data:/app/sqlite
     env_file:
       - path: .env
         required: false
     environment:
+      DB_PATH: /app/sqlite/autoseller.db
       REDIS_URL: redis://redis:6379/0
     depends_on:
+      db-bootstrap:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     restart: unless-stopped
@@ -194,12 +240,16 @@ services:
     command: ["python", "-m", "app.social.threads.scheduling"]
     volumes:
       - ./data:/app/data
+      - sqlite-data:/app/sqlite
     env_file:
       - path: .env
         required: false
     environment:
+      DB_PATH: /app/sqlite/autoseller.db
       REDIS_URL: redis://redis:6379/0
     depends_on:
+      db-bootstrap:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     restart: unless-stopped
@@ -219,3 +269,4 @@ services:
 
 volumes:
   redis-data:
+  sqlite-data:
