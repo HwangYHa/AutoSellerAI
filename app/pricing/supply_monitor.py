@@ -259,25 +259,26 @@ def rebuild_supplier_mappings() -> dict[str, Any]:
 
         def _write() -> str:
             with get_db() as db:
-                row = db.query(SupplierProductMap).filter_by(product_id=product_id).first()
-                if row and row.verified and not candidate.verified:
-                    return "preserved"
-                if row is None:
-                    row = SupplierProductMap(product_id=product_id)
-                    action = "created"
-                else:
-                    action = "updated"
-                row.supplier_id = candidate.supplier_id
-                row.raw_id = candidate.raw_id
-                row.match_type = candidate.match_type
-                row.confidence = candidate.confidence
-                row.verified = candidate.verified
-                if candidate.supply_price > 0 and float(row.current_supply_price or 0) <= 0:
-                    row.current_supply_price = candidate.supply_price
-                row.last_error = ""
-                db.add(row)
-                db.commit()
-                return action
+                with sqlite_writer_guard(db):
+                    row = db.query(SupplierProductMap).filter_by(product_id=product_id).first()
+                    if row and row.verified and not candidate.verified:
+                        return "preserved"
+                    if row is None:
+                        row = SupplierProductMap(product_id=product_id)
+                        action = "created"
+                    else:
+                        action = "updated"
+                    row.supplier_id = candidate.supplier_id
+                    row.raw_id = candidate.raw_id
+                    row.match_type = candidate.match_type
+                    row.confidence = candidate.confidence
+                    row.verified = candidate.verified
+                    if candidate.supply_price > 0 and float(row.current_supply_price or 0) <= 0:
+                        row.current_supply_price = candidate.supply_price
+                    row.last_error = ""
+                    db.add(row)
+                    db.commit()
+                    return action
 
         action = retry_sqlite_write(_write, attempts=8)
         if action == "created":
@@ -340,36 +341,48 @@ def refresh_supplier_prices(*, max_items: int = 500) -> dict[str, Any]:
             )
         ]
 
-    refreshed = changed = unchanged = failed = unavailable = 0
+    refreshed = changed = unchanged = failed = unavailable = cached = 0
     errors: list[str] = []
 
     for mapping in mappings:
         adapter = get_adapter(mapping["supplier_id"])
-        if adapter is None or not adapter.is_available():
+        new_price = 0.0
+        observed_at: datetime | None = None
+        used_cached_price = False
+
+        if adapter is not None and adapter.is_available():
+            try:
+                item = adapter.get_product(mapping["raw_id"])
+            except Exception as exc:
+                item = None
+                errors.append(f'{mapping["supplier_id"]}/{mapping["raw_id"]}: API 조회 오류: {exc}')
+            if item is not None and float(item.supply_price or 0) > 0:
+                new_price = float(item.supply_price)
+                observed_at = _utcnow()
+        else:
             unavailable += 1
-            msg = f'{mapping["supplier_id"]}/{mapping["raw_id"]}: 공급사 연동 비활성'
-            _record_refresh_failure(
-                mapping["id"], mapping["product_id"], mapping["supplier_id"], mapping["raw_id"], msg
-            )
-            errors.append(msg)
-            continue
 
-        try:
-            item = adapter.get_product(mapping["raw_id"])
-        except Exception as exc:
-            item = None
-            errors.append(f'{mapping["supplier_id"]}/{mapping["raw_id"]}: {exc}')
-
-        if item is None or float(item.supply_price or 0) <= 0:
-            failed += 1
-            msg = f'{mapping["supplier_id"]}/{mapping["raw_id"]}: 유효한 최신 공급가를 조회하지 못했습니다.'
-            _record_refresh_failure(
-                mapping["id"], mapping["product_id"], mapping["supplier_id"], mapping["raw_id"], msg
-            )
-            errors.append(msg)
-            continue
-
-        new_price = float(item.supply_price)
+        if new_price <= 0:
+            with get_db() as db:
+                local_price, local_updated_at = _fresh_local_raw_price(
+                    db, mapping["supplier_id"], mapping["raw_id"]
+                )
+            if local_price > 0 and local_updated_at is not None:
+                new_price = local_price
+                observed_at = local_updated_at
+                used_cached_price = True
+                cached += 1
+            else:
+                failed += 1
+                msg = (
+                    f'{mapping["supplier_id"]}/{mapping["raw_id"]}: '
+                    "공급사 API와 72시간 이내 로컬 원본 모두에서 유효한 최신 공급가를 확인하지 못했습니다."
+                )
+                _record_refresh_failure(
+                    mapping["id"], mapping["product_id"], mapping["supplier_id"], mapping["raw_id"], msg
+                )
+                errors.append(msg)
+                continue
 
         def _write_refresh() -> tuple[float, float]:
             with get_db() as db:
@@ -383,7 +396,7 @@ def refresh_supplier_prices(*, max_items: int = 500) -> dict[str, Any]:
 
                 row.previous_supply_price = old_price
                 row.current_supply_price = new_price
-                row.last_refreshed_at = _utcnow()
+                row.last_refreshed_at = observed_at or _utcnow()
                 row.last_error = ""
 
                 # Canonical product supply price is refreshed from the durable supplier mapping.
@@ -398,9 +411,9 @@ def refresh_supplier_prices(*, max_items: int = 500) -> dict[str, Any]:
                     .order_by(desc(SupplierRawProduct.updated_at))
                     .first()
                 )
-                if raw:
+                if raw and not used_cached_price:
                     raw.raw_price = new_price
-                    raw.updated_at = _utcnow()
+                    raw.updated_at = observed_at or _utcnow()
 
                 workflow = (
                     db.query(SupplierWorkflowItem)
@@ -422,7 +435,11 @@ def refresh_supplier_prices(*, max_items: int = 500) -> dict[str, Any]:
                         old_price=old_price,
                         new_price=new_price,
                         change_rate=change_rate,
-                        status="changed" if abs(new_price - old_price) >= 1 else "unchanged",
+                        status=(
+                            "cached"
+                            if used_cached_price
+                            else ("changed" if abs(new_price - old_price) >= 1 else "unchanged")
+                        ),
                     )
                 )
                 db.commit()
@@ -450,6 +467,7 @@ def refresh_supplier_prices(*, max_items: int = 500) -> dict[str, Any]:
         "unchanged": unchanged,
         "failed": failed,
         "unavailable": unavailable,
+        "cached": cached,
         "errors": errors[:50],
     }
 
