@@ -244,6 +244,7 @@ class CoupangUploader:
     def _build_items(product: dict, options_raw: list[dict], img_list: list[dict], notices: list[dict], contents: list[dict]) -> list[dict]:
         price = max(10, int(product["sell_price"]))
         stock = max(1, min(99999, int(product.get("stock", 999) or 999)))
+        seller_sku = str(product.get("sku") or "").strip()
         base_item: dict[str, Any] = {
             "originalPrice": price,
             "salePrice": price,
@@ -267,6 +268,7 @@ class CoupangUploader:
         if not options_raw:
             return [{
                 **base_item,
+                **({"externalVendorSkuCode": seller_sku[:40]} if seller_sku else {}),
                 "itemName": str(product["name"])[:150],
                 "attributes": [{"attributeTypeName": "수량", "attributeValueName": "1개"}],
             }]
@@ -275,15 +277,18 @@ class CoupangUploader:
         if not values:
             return [{
                 **base_item,
+                **({"externalVendorSkuCode": seller_sku[:40]} if seller_sku else {}),
                 "itemName": str(product["name"])[:150],
                 "attributes": [{"attributeTypeName": "수량", "attributeValueName": "1개"}],
             }]
         items = []
-        for value in values[:200]:
+        for index, value in enumerate(values[:200], start=1):
             option_name = str(opt.get("name") or "옵션")[:25]
             option_value = str(value)[:30]
+            option_sku = f"{seller_sku[:34]}-{index}" if seller_sku else ""
             items.append({
                 **base_item,
+                **({"externalVendorSkuCode": option_sku[:40]} if option_sku else {}),
                 "itemName": f"{str(product['name'])[:110]} {option_value}"[:150],
                 "attributes": [{"attributeTypeName": option_name, "attributeValueName": option_value}],
             })

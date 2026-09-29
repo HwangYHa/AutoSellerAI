@@ -90,9 +90,37 @@ def import_product(source: str, source_id: str,
         with get_db() as db:
             existing = db.query(Product).filter_by(sku=sku).first()
             if existing:
+                # Supplier facts are canonical. Re-import must refresh wholesale
+                # lineage and cost instead of only changing the retail fields.
+                existing.source = source
+                existing.source_id = source_id
+                existing.source_url = prod.source_url
+                existing.supply_price = float(prod.supply_price or 0)
                 existing.sell_price = sell_price
+                existing.category = prod.category
+                existing.brand = prod.brand
+                existing.origin = prod.origin
+                existing.material = prod.material
+                existing.images = json.dumps(prod.images, ensure_ascii=False)
+                existing.detail_images = json.dumps(prod.detail_images, ensure_ascii=False)
+                existing.options = json.dumps(prod.options, ensure_ascii=False)
                 existing.detail_html = detail_html
                 existing.name = name
+                raw = db.query(SupplierRawProduct).filter_by(
+                    supplier_id=source, raw_id=source_id
+                ).first()
+                if raw:
+                    raw.product_id = existing.id
+                    raw.raw_price = float(prod.supply_price or raw.raw_price or 0)
+                    raw.raw_url = prod.source_url or raw.raw_url
+                    raw.raw_name = str(prod.name or raw.raw_name)[:400]
+                    raw.updated_at = datetime.utcnow()
+                workflow = db.query(SupplierWorkflowItem).filter_by(
+                    supplier_id=source, raw_id=source_id
+                ).first()
+                if workflow:
+                    workflow.product_id = existing.id
+                    workflow.supply_price = float(prod.supply_price or workflow.supply_price or 0)
                 db.commit()
                 return {"id": existing.id, "sku": sku, "name": name, "status": "updated"}
 
@@ -115,6 +143,20 @@ def import_product(source: str, source_id: str,
                 status="ready",
             )
             db.add(p)
+            db.flush()
+            raw = db.query(SupplierRawProduct).filter_by(
+                supplier_id=source, raw_id=source_id
+            ).first()
+            if raw:
+                raw.product_id = p.id
+                raw.raw_price = float(prod.supply_price or raw.raw_price or 0)
+                raw.updated_at = datetime.utcnow()
+            workflow = db.query(SupplierWorkflowItem).filter_by(
+                supplier_id=source, raw_id=source_id
+            ).first()
+            if workflow:
+                workflow.product_id = p.id
+                workflow.supply_price = float(prod.supply_price or workflow.supply_price or 0)
             db.commit()
             db.refresh(p)
             return {"id": p.id, "sku": sku, "name": name, "status": "imported"}
@@ -2063,31 +2105,35 @@ def bulk_collect_and_score(
 
 
 def _save_raw_products(products) -> None:
-    """NormalizedProduct 목록을 supplier_raw_products 테이블에 저장 (중복 스킵)."""
+    """Upsert supplier raw rows so the local wholesale cache stays current."""
     with get_db() as db:
         for p in products:
-            exists = db.query(SupplierRawProduct).filter_by(
+            row = db.query(SupplierRawProduct).filter_by(
                 supplier_id=p.supplier_id, raw_id=p.raw_id
             ).first()
-            if exists:
-                continue
             moq_field = {
                 "domeggook": "min_order_qty",
                 "domemai": "minimumQty",
                 "onchannel": "buyCnt",
+                "ownerclan": "moq",
             }.get(p.supplier_id, "moq")
 
-            db.add(SupplierRawProduct(
-                supplier_id=p.supplier_id,
-                raw_id=p.raw_id,
-                raw_url=p.raw_url,
-                raw_name=p.name[:400],
-                raw_price=p.supply_price,
-                raw_moq_field=moq_field,
-                raw_moq_value=p.moq,
-                raw_stock=p.stock,
-                raw_json=p.raw_json(),
-            ))
+            if row is None:
+                row = SupplierRawProduct(
+                    supplier_id=p.supplier_id,
+                    raw_id=p.raw_id,
+                )
+                db.add(row)
+
+            # Never clear an existing product_id while refreshing source facts.
+            row.raw_url = p.raw_url
+            row.raw_name = p.name[:400]
+            row.raw_price = float(p.supply_price or 0)
+            row.raw_moq_field = moq_field
+            row.raw_moq_value = p.moq
+            row.raw_stock = p.stock
+            row.raw_json = p.raw_json()
+            row.updated_at = datetime.utcnow()
         db.commit()
 
 

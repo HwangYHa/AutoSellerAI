@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from typing import Any
 
@@ -69,7 +70,11 @@ def _find_or_link_product(
     platform_id: str,
     item: dict,
 ) -> tuple[Product, bool]:
-    """Returns (product, created)."""
+    """Returns (product, created).
+
+    Supplier-origin products are linked by the SKU embedded in marketplace metadata
+    before any name-based fallback. This preserves wholesale lineage after reverse sync.
+    """
     name = str(item.get("name", "") or "").strip()
     price = _number(item.get("price"))
     sku = f"IMPORT-{platform}-{platform_id}"[:120]
@@ -77,6 +82,12 @@ def _find_or_link_product(
     existing = db.query(Product).filter_by(sku=sku).first()
     if existing:
         return existing, False
+
+    seller_sku = str(item.get("seller_sku") or "").strip()
+    if seller_sku:
+        supplier_product = db.query(Product).filter_by(sku=seller_sku).first()
+        if supplier_product is not None:
+            return supplier_product, False
 
     target_key = _normalize(name)[:30]
     if target_key:
@@ -166,8 +177,30 @@ def _sync_one(platform: str, item: dict) -> str:
         if listing:
             product = db.query(Product).filter_by(id=listing.product_id).first()
             changed = False
+
+            # Repair an already-created marketplace-import Product when the channel
+            # exposes the original AutoSellerAI SKU. This is intentionally exact-SKU
+            # only; name similarity is never allowed to rewrite lineage automatically.
+            seller_sku = str(item.get("seller_sku") or "").strip()
+            if seller_sku:
+                canonical = db.query(Product).filter_by(sku=seller_sku).first()
+                if canonical is not None and canonical.id != listing.product_id:
+                    old_product = product
+                    listing.product_id = canonical.id
+                    product = canonical
+                    changed = True
+                    if (
+                        old_product is not None
+                        and str(old_product.source or "").endswith("_import")
+                        and not db.query(Listing).filter(
+                            Listing.product_id == old_product.id,
+                            Listing.id != listing.id,
+                        ).first()
+                    ):
+                        old_product.status = "orphaned_import"
+
             if product:
-                changed = _apply_external_fields(product, item, platform)
+                changed = _apply_external_fields(product, item, platform) or changed
             if listing.status != "success" or listing.error:
                 listing.status = "success"
                 listing.error = ""
@@ -245,8 +278,23 @@ def _coupang_item(summary: dict, detail: dict) -> dict:
     ]
     images, detail_images = extract_coupang_product_images(detail)
     seller_id = str(summary.get("sellerProductId", "") or detail.get("sellerProductId") or "").strip()
+    seller_skus = {
+        str(x.get("externalVendorSkuCode") or "").strip()
+        for x in detail_items
+        if str(x.get("externalVendorSkuCode") or "").strip()
+    }
+    seller_sku = next(iter(seller_skus)) if len(seller_skus) == 1 else ""
+    if len(seller_skus) > 1:
+        bases = {
+            re.sub(r"-\d+$", "", value)
+            for value in seller_skus
+            if re.search(r"-\d+$", value)
+        }
+        if len(bases) == 1 and all(value.startswith(next(iter(bases)) + "-") for value in seller_skus):
+            seller_sku = next(iter(bases))
     return {
         "platform_id": seller_id,
+        "seller_sku": seller_sku,
         "name": (
             detail.get("displayProductName")
             or detail.get("sellerProductName")
@@ -330,6 +378,48 @@ def _smartstore_search_page(uploader, page: int, page_size: int) -> dict:
     return response.json()
 
 
+def _smartstore_lineage_sku_from_detail(uploader, origin_no: str) -> str:
+    """Read the modelName we write as AutoSellerAI SKU, only when lineage recovery needs it."""
+    if not origin_no:
+        return ""
+    try:
+        response = httpx.get(
+            f"https://api.commerce.naver.com/external/v2/products/origin-products/{origin_no}",
+            headers=uploader._headers(),
+            timeout=15,
+        )
+        if response.status_code == 404:
+            response = httpx.get(
+                f"https://api.commerce.naver.com/external/v2/products/{origin_no}",
+                headers=uploader._headers(),
+                timeout=15,
+            )
+        if response.status_code != 200:
+            return ""
+        data = response.json()
+        origin = data.get("originProduct") or data
+        return str(
+            (origin.get("detailAttribute") or {})
+            .get("naverShoppingSearchInfo", {})
+            .get("modelName")
+            or ""
+        ).strip()
+    except Exception as exc:
+        logger.debug("스마트스토어 공급사 계보 SKU 상세조회 실패 [%s]: %s", origin_no, exc)
+        return ""
+
+
+def _needs_market_lineage_recovery(platform: str, platform_id: str) -> bool:
+    with get_db() as db:
+        listing = db.query(Listing).filter_by(platform=platform, platform_id=platform_id).first()
+        if listing is None:
+            return True
+        product = db.get(Product, listing.product_id)
+        if product is None:
+            return True
+        return str(product.source or "").endswith("_import") or float(product.supply_price or 0) <= 0
+
+
 def sync_smartstore_catalog(max_pages: int = 20) -> dict:
     """스마트스토어 판매자센터 전체 상품을 공식 상품검색 API로 역동기화한다."""
     from app.platforms.smartstore import get_smartstore_uploader
@@ -356,8 +446,30 @@ def sync_smartstore_catalog(max_pages: int = 20) -> dict:
 
                 image_obj = channel.get("representativeImage") or {}
                 image_url = normalize_image_url(image_obj.get("url"), platform="smartstore")
+                seller_sku = str(
+                    channel.get("sellerManagementCode")
+                    or row.get("sellerManagementCode")
+                    or channel.get("modelName")
+                    or row.get("modelName")
+                    or (
+                        (row.get("originProduct") or {})
+                        .get("detailAttribute", {})
+                        .get("naverShoppingSearchInfo", {})
+                        .get("modelName")
+                    )
+                    or (
+                        (channel.get("detailAttribute") or {})
+                        .get("naverShoppingSearchInfo", {})
+                        .get("modelName")
+                    )
+                    or ""
+                ).strip()
+                if not seller_sku and _needs_market_lineage_recovery("smartstore", origin_no):
+                    seller_sku = _smartstore_lineage_sku_from_detail(uploader, origin_no)
+
                 items.append({
                     "platform_id": origin_no,
+                    "seller_sku": seller_sku,
                     "name": channel.get("name") or row.get("name") or "",
                     "price": channel.get("salePrice") or row.get("salePrice") or 0,
                     "category": channel.get("wholeCategoryName") or channel.get("categoryId") or "",

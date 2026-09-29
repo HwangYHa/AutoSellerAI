@@ -96,9 +96,10 @@ def round_price_up(value: float, ending: int = 900) -> int:
 
 def margin_rate(price: float, supply_price: float, fee_rate: float) -> float:
     price = float(price or 0)
-    if price <= 0:
+    cost = float(supply_price or 0)
+    if price <= 0 or cost <= 0:
         return 0.0
-    return (price - float(supply_price or 0) - price * float(fee_rate or 0)) / price
+    return (price - cost - price * float(fee_rate or 0)) / price
 
 
 def auto_price_bounds(
@@ -215,7 +216,7 @@ def _resolve_supply_price(db, product: Product) -> tuple[float, str, dict[str, A
             )
         mapping = {
             "mapped": True,
-            "safe": bool(row.verified or row.match_type == "exact_name_unique"),
+            "safe": bool(row.verified or row.match_type in {"exact_name_unique", "supplier_raw_exact_name_unique", "supplier_workflow_exact_name_unique"}),
             "fresh": age_hours is not None and age_hours <= DEFAULT_MAX_SUPPLY_AGE_HOURS,
             "age_hours": age_hours,
             "match_type": row.match_type or "",

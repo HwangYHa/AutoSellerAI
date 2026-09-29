@@ -25,9 +25,13 @@ from app.pricing.supply_monitor import (
     DEFAULT_MAX_SUPPLY_AGE_HOURS,
     classify_price_risk,
     list_supplier_mappings,
+    list_unresolved_supplier_products,
+    manual_map_supplier_product,
     persist_price_risks,
     rebuild_supplier_mappings,
     refresh_supplier_prices,
+    repair_supplier_mappings,
+    supplier_mapping_suggestions,
     supply_price_history,
 )
 from app.pricing.service import (
@@ -177,34 +181,45 @@ st.caption(
     f"마지막 성공 갱신이 {int(DEFAULT_MAX_SUPPLY_AGE_HOURS)}시간을 넘긴 상품은 가격 변경 대상에서 자동 차단됩니다."
 )
 
-mcol1, mcol2, mcol3 = st.columns([1, 1, 2])
+mcol1, mcol2, mcol3 = st.columns([1, 1, 1])
 with mcol1:
-    if st.button("① 상품 매핑 재구축", use_container_width=True):
-        with st.spinner("판매상품과 공급사 상품을 안전하게 매칭하는 중입니다..."):
+    if st.button("① 안전 매핑 재구축", use_container_width=True):
+        with st.spinner("판매상품의 공급사 계보를 안전한 근거만으로 복구하는 중입니다..."):
             result = rebuild_supplier_mappings()
         st.session_state["supplier_mapping_result"] = result
         st.success(
             f"매칭 {result['matched']} / 미매칭 {result['unmatched']} · "
-            f"신규 {result['created']} / 갱신 {result['updated']}"
+            f"신규 {result['created']} / 갱신 {result['updated']} / 보존 {result.get('preserved', 0)}"
         )
 with mcol2:
     refresh_limit = st.number_input("이번 갱신 최대 상품수", min_value=1, max_value=5000, value=500, step=50)
-    if st.button("② 매핑된 도매가 최신화", type="primary", use_container_width=True):
-        with st.spinner("공급사 API에서 최신 공급가를 확인하는 중입니다..."):
+    if st.button("② 도매가 최신화", use_container_width=True):
+        with st.spinner("공급사 API와 72시간 이내 원본 캐시에서 최신 공급가를 확인하는 중입니다..."):
             result = refresh_supplier_prices(max_items=int(refresh_limit))
         st.session_state["supplier_refresh_result"] = result
         st.success(
             f"갱신 {result['refreshed']} · 가격변동 {result['changed']} · "
-            f"실패 {result['failed']} · 연동비활성 {result['unavailable']}"
+            f"캐시복구 {result.get('cached', 0)} · 실패 {result['failed']} · "
+            f"API비활성 {result['unavailable']}"
         )
         if result.get("errors"):
             st.warning("\n".join(result["errors"][:8]))
 with mcol3:
-    st.info(
-        "자동 매핑은 ① 공급사 원본 연결, ② 기존 공급사 워크플로우 연결, "
-        "③ 정규화 상품명이 완전히 같고 후보가 1개뿐인 경우까지만 허용합니다. "
-        "유사도(fuzzy) 추정 매칭은 판매가 자동수정에 사용하지 않습니다."
-    )
+    if st.button("③ 전체 자동 복구", type="primary", use_container_width=True):
+        with st.spinner("계보 복구 → 도매가 최신화 → 미해결 원인 재진단을 실행하는 중입니다..."):
+            result = repair_supplier_mappings(max_refresh=int(refresh_limit))
+        st.session_state["supplier_repair_result"] = result
+        rebuilt = result["rebuilt"]
+        refreshed = result["refreshed"]
+        st.success(
+            f"자동 복구 완료 · 매핑 {rebuilt['matched']} · 최신화 {refreshed['refreshed']} · "
+            f"미해결 {result['unresolved_count']}"
+        )
+
+st.info(
+    "자동 매핑은 공급사 source/source_id, 원본·워크플로우 직접 연결, 공급사 URL, "
+    "완전일치 단일 후보만 사용합니다. 이름 유사도 후보는 자동 적용하지 않고 아래 수동 검증 영역에서만 제시합니다."
+)
 
 mapping_rows = list_supplier_mappings()
 with st.expander(f"도매 상품 매핑 현황 · {len(mapping_rows)}개"):
@@ -212,6 +227,86 @@ with st.expander(f"도매 상품 매핑 현황 · {len(mapping_rows)}개"):
         st.dataframe(pd.DataFrame(mapping_rows), use_container_width=True, hide_index=True)
     else:
         st.caption("아직 생성된 도매 상품 매핑이 없습니다.")
+
+unresolved_supplier_rows = list_unresolved_supplier_products(500)
+with st.expander(
+    f"🧭 도매가 미확인 정밀진단 · {len(unresolved_supplier_rows)}개",
+    expanded=bool(unresolved_supplier_rows),
+):
+    if unresolved_supplier_rows:
+        st.dataframe(pd.DataFrame(unresolved_supplier_rows), use_container_width=True, hide_index=True)
+        unresolved_ids = [int(x["product_id"]) for x in unresolved_supplier_rows]
+        selected_unresolved_id = st.selectbox(
+            "수동 검증할 상품",
+            unresolved_ids,
+            format_func=lambda pid: next(
+                (f"#{pid} · {x['상품명'][:70]}" for x in unresolved_supplier_rows if int(x["product_id"]) == pid),
+                str(pid),
+            ),
+        )
+        suggestions = supplier_mapping_suggestions(int(selected_unresolved_id), limit=8)
+        if suggestions:
+            st.caption("아래 후보는 이름 유사도 기반 참고자료이며 자동으로 연결하지 않습니다.")
+            st.dataframe(pd.DataFrame(suggestions), use_container_width=True, hide_index=True)
+            suggestion_idx = st.selectbox(
+                "검증할 추천 후보",
+                list(range(len(suggestions))),
+                format_func=lambda i: (
+                    f"{suggestions[i]['공급사']} / {suggestions[i]['공급사상품ID']} · "
+                    f"유사도 {suggestions[i]['유사도(%)']}% · {suggestions[i]['후보상품명'][:65]}"
+                ),
+                key="pricing_supplier_suggestion",
+            )
+            if st.button("선택 후보 실시간 검증 후 연결", use_container_width=True):
+                chosen = suggestions[int(suggestion_idx)]
+                result = manual_map_supplier_product(
+                    int(selected_unresolved_id),
+                    str(chosen["공급사"]),
+                    str(chosen["공급사상품ID"]),
+                    verify_live=True,
+                )
+                if result.get("ok"):
+                    st.success(
+                        f"추천 후보 검증·매핑 완료 · {result['supplier_id']}/{result['raw_id']} · "
+                        f"도매가 {result['supply_price']:,.0f}원"
+                    )
+                    st.session_state.pop("pricing_rows", None)
+                    st.rerun()
+                else:
+                    st.error(result.get("error") or "추천 후보 검증에 실패했습니다.")
+        else:
+            st.caption("자동 제안 가능한 공급사 원본 후보가 없습니다.")
+
+        st.caption("추천 후보가 없거나 실제 공급사 상품ID를 알고 있다면 아래에서 직접 검증·연결할 수 있습니다.")
+        mm1, mm2, mm3 = st.columns([1, 2, 1])
+        manual_supplier = mm1.selectbox(
+            "공급사",
+            ["domeggook", "domemai", "onchannel", "ownerclan"],
+            key="pricing_manual_supplier",
+        )
+        manual_raw_id = mm2.text_input(
+            "공급사 상품ID",
+            key="pricing_manual_raw_id",
+            placeholder="공급사 원본 상품번호를 정확히 입력",
+        )
+        if mm3.button("검증 후 연결", type="primary", use_container_width=True):
+            result = manual_map_supplier_product(
+                int(selected_unresolved_id),
+                manual_supplier,
+                manual_raw_id,
+                verify_live=True,
+            )
+            if result.get("ok"):
+                st.success(
+                    f"매핑 완료 · {result['supplier_id']}/{result['raw_id']} · "
+                    f"도매가 {result['supply_price']:,.0f}원"
+                )
+                st.session_state.pop("pricing_rows", None)
+                st.rerun()
+            else:
+                st.error(result.get("error") or "공급사 상품 연결에 실패했습니다.")
+    else:
+        st.success("판매중 상품의 공급사 계보와 도매가가 모두 확인되었습니다.")
 
 left, right = st.columns([1, 3])
 with left:
@@ -290,7 +385,7 @@ for x in filtered:
         "현재 판매가": int(x.current_price),
         "수수료(%)": round(x.fee_rate * 100, 2),
         "수수료 출처": x.fee_source,
-        "현재마진(%)": round(x.current_margin_rate * 100, 2),
+        "현재마진(%)": round(x.current_margin_rate * 100, 2) if x.supply_price > 0 else None,
         "권장 판매가": int(x.target_price),
         "변경액": int(x.delta),
         "쿠팡 가드 최저": int(x.auto_floor_price),
