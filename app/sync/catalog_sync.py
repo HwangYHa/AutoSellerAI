@@ -69,7 +69,11 @@ def _find_or_link_product(
     platform_id: str,
     item: dict,
 ) -> tuple[Product, bool]:
-    """Returns (product, created)."""
+    """Returns (product, created).
+
+    Supplier-origin products are linked by the SKU embedded in marketplace metadata
+    before any name-based fallback. This preserves wholesale lineage after reverse sync.
+    """
     name = str(item.get("name", "") or "").strip()
     price = _number(item.get("price"))
     sku = f"IMPORT-{platform}-{platform_id}"[:120]
@@ -77,6 +81,12 @@ def _find_or_link_product(
     existing = db.query(Product).filter_by(sku=sku).first()
     if existing:
         return existing, False
+
+    seller_sku = str(item.get("seller_sku") or "").strip()
+    if seller_sku:
+        supplier_product = db.query(Product).filter_by(sku=seller_sku).first()
+        if supplier_product is not None:
+            return supplier_product, False
 
     target_key = _normalize(name)[:30]
     if target_key:
@@ -245,8 +255,15 @@ def _coupang_item(summary: dict, detail: dict) -> dict:
     ]
     images, detail_images = extract_coupang_product_images(detail)
     seller_id = str(summary.get("sellerProductId", "") or detail.get("sellerProductId") or "").strip()
+    seller_skus = {
+        str(x.get("externalVendorSkuCode") or "").strip()
+        for x in detail_items
+        if str(x.get("externalVendorSkuCode") or "").strip()
+    }
+    seller_sku = next(iter(seller_skus)) if len(seller_skus) == 1 else ""
     return {
         "platform_id": seller_id,
+        "seller_sku": seller_sku,
         "name": (
             detail.get("displayProductName")
             or detail.get("sellerProductName")
@@ -358,6 +375,13 @@ def sync_smartstore_catalog(max_pages: int = 20) -> dict:
                 image_url = normalize_image_url(image_obj.get("url"), platform="smartstore")
                 items.append({
                     "platform_id": origin_no,
+                    "seller_sku": str(
+                        channel.get("sellerManagementCode")
+                        or row.get("sellerManagementCode")
+                        or channel.get("modelName")
+                        or row.get("modelName")
+                        or ""
+                    ).strip(),
                     "name": channel.get("name") or row.get("name") or "",
                     "price": channel.get("salePrice") or row.get("salePrice") or 0,
                     "category": channel.get("wholeCategoryName") or channel.get("categoryId") or "",
