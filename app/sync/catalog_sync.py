@@ -264,9 +264,9 @@ def _coupang_item(summary: dict, detail: dict) -> dict:
     seller_sku = next(iter(seller_skus)) if len(seller_skus) == 1 else ""
     if len(seller_skus) > 1:
         bases = {
-            re.sub(r"-\\d+$", "", value)
+            re.sub(r"-\d+$", "", value)
             for value in seller_skus
-            if re.search(r"-\\d+$", value)
+            if re.search(r"-\d+$", value)
         }
         if len(bases) == 1 and all(value.startswith(next(iter(bases)) + "-") for value in seller_skus):
             seller_sku = next(iter(bases))
