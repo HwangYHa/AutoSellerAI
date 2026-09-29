@@ -17,8 +17,8 @@ import sqlite3
 from pathlib import Path
 
 
-legacy_db = Path(os.getenv("legacy_db_PATH", "/legacy/autoseller.db"))
-target_db = Path(os.getenv("target_db_PATH", "/app/sqlite/autoseller.db"))
+LEGACY_DB = Path(os.getenv("LEGACY_DB_PATH", "/legacy/autoseller.db"))
+TARGET_DB = Path(os.getenv("TARGET_DB_PATH", "/app/sqlite/autoseller.db"))
 
 
 def bootstrap_sqlite_volume(legacy_db: Path, target_db: Path) -> bool:
