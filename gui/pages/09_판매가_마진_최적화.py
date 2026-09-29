@@ -248,9 +248,36 @@ with st.expander(
         if suggestions:
             st.caption("아래 후보는 이름 유사도 기반 참고자료이며 자동으로 연결하지 않습니다.")
             st.dataframe(pd.DataFrame(suggestions), use_container_width=True, hide_index=True)
+            suggestion_idx = st.selectbox(
+                "검증할 추천 후보",
+                list(range(len(suggestions))),
+                format_func=lambda i: (
+                    f"{suggestions[i]['공급사']} / {suggestions[i]['공급사상품ID']} · "
+                    f"유사도 {suggestions[i]['유사도(%)']}% · {suggestions[i]['후보상품명'][:65]}"
+                ),
+                key="pricing_supplier_suggestion",
+            )
+            if st.button("선택 후보 실시간 검증 후 연결", use_container_width=True):
+                chosen = suggestions[int(suggestion_idx)]
+                result = manual_map_supplier_product(
+                    int(selected_unresolved_id),
+                    str(chosen["공급사"]),
+                    str(chosen["공급사상품ID"]),
+                    verify_live=True,
+                )
+                if result.get("ok"):
+                    st.success(
+                        f"추천 후보 검증·매핑 완료 · {result['supplier_id']}/{result['raw_id']} · "
+                        f"도매가 {result['supply_price']:,.0f}원"
+                    )
+                    st.session_state.pop("pricing_rows", None)
+                    st.rerun()
+                else:
+                    st.error(result.get("error") or "추천 후보 검증에 실패했습니다.")
         else:
             st.caption("자동 제안 가능한 공급사 원본 후보가 없습니다.")
 
+        st.caption("추천 후보가 없거나 실제 공급사 상품ID를 알고 있다면 아래에서 직접 검증·연결할 수 있습니다.")
         mm1, mm2, mm3 = st.columns([1, 2, 1])
         manual_supplier = mm1.selectbox(
             "공급사",
