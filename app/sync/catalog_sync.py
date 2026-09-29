@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from typing import Any
 
@@ -261,6 +262,14 @@ def _coupang_item(summary: dict, detail: dict) -> dict:
         if str(x.get("externalVendorSkuCode") or "").strip()
     }
     seller_sku = next(iter(seller_skus)) if len(seller_skus) == 1 else ""
+    if len(seller_skus) > 1:
+        bases = {
+            re.sub(r"-\\d+$", "", value)
+            for value in seller_skus
+            if re.search(r"-\\d+$", value)
+        }
+        if len(bases) == 1 and all(value.startswith(next(iter(bases)) + "-") for value in seller_skus):
+            seller_sku = next(iter(bases))
     return {
         "platform_id": seller_id,
         "seller_sku": seller_sku,
@@ -380,6 +389,17 @@ def sync_smartstore_catalog(max_pages: int = 20) -> dict:
                         or row.get("sellerManagementCode")
                         or channel.get("modelName")
                         or row.get("modelName")
+                        or (
+                            (row.get("originProduct") or {})
+                            .get("detailAttribute", {})
+                            .get("naverShoppingSearchInfo", {})
+                            .get("modelName")
+                        )
+                        or (
+                            (channel.get("detailAttribute") or {})
+                            .get("naverShoppingSearchInfo", {})
+                            .get("modelName")
+                        )
                         or ""
                     ).strip(),
                     "name": channel.get("name") or row.get("name") or "",
