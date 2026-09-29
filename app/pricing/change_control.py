@@ -5,6 +5,7 @@ from dataclasses import dataclass, asdict
 from typing import Any
 
 from sqlalchemy import desc, func
+from sqlalchemy.exc import OperationalError
 
 from app.db import Order, PlatformOrder, Product, get_db
 from app.pricing.models import (
@@ -247,7 +248,28 @@ def apply_guarded_batch(
             "error": "급격한 가격변동 또는 판매이력 상품이 포함되어 추가 승인이 필요합니다.",
         }
 
-    batch_key = _create_batch(preview, mode)
+    try:
+        batch_key = _create_batch(preview, mode)
+    except OperationalError as exc:
+        return {
+            "ok": False,
+            "needs_confirmation": False,
+            "batch_key": "",
+            "total": len(rows),
+            "success": 0,
+            "failed": len(rows),
+            "blocked": 0,
+            "results": [
+                {
+                    "ok": False,
+                    "listing_id": int(getattr(row, "listing_id", 0) or 0),
+                    "error": "가격 변경 배치 저장 중 DB 쓰기 경합이 해소되지 않았습니다. 잠시 후 다시 실행하세요.",
+                }
+                for row in rows
+            ],
+            "preview": preview,
+            "error": f"가격 변경 배치 생성 실패: {exc}",
+        }
     item_meta = {int(x["listing_id"]): x for x in preview["items"]}
     success = failed = blocked = 0
     results: list[dict[str, Any]] = []
