@@ -153,38 +153,38 @@ def _create_batch(preview: dict[str, Any], mode: str) -> str:
 
     def _write() -> None:
         with get_db() as db:
-            db.add(
-                PriceChangeBatch(
-                    batch_key=batch_key,
-                    mode=str(mode or "selected")[:30],
-                    total_count=int(summary["total"]),
-                    sensitive_count=int(summary["sensitive"]),
-                    status="running",
-                )
-            )
-            for item in preview["items"]:
+            with sqlite_writer_guard(db):
                 db.add(
-                    PriceChangeBatchItem(
+                    PriceChangeBatch(
                         batch_key=batch_key,
-                        product_id=int(item["product_id"]),
-                        listing_id=int(item["listing_id"]),
-                        platform=str(item["platform"]),
-                        platform_id=str(item["platform_id"]),
-                        before_price=float(item["before_price"]),
-                        after_price=float(item["after_price"]),
-                        change_pct=float(item["change_pct"]),
-                        sales_count=int(item["sales_count"]),
-                        guard_level=str(item["guard_level"]),
-                        guard_reason=str(item["guard_reason"])[:500],
-                        status="blocked" if item["guard_level"] == "BLOCKED" else "pending",
-                        error=str(item["guard_reason"])[:1000] if item["guard_level"] == "BLOCKED" else "",
+                        mode=str(mode or "selected")[:30],
+                        total_count=int(summary["total"]),
+                        sensitive_count=int(summary["sensitive"]),
+                        status="running",
                     )
                 )
-            db.commit()
+                for item in preview["items"]:
+                    db.add(
+                        PriceChangeBatchItem(
+                            batch_key=batch_key,
+                            product_id=int(item["product_id"]),
+                            listing_id=int(item["listing_id"]),
+                            platform=str(item["platform"]),
+                            platform_id=str(item["platform_id"]),
+                            before_price=float(item["before_price"]),
+                            after_price=float(item["after_price"]),
+                            change_pct=float(item["change_pct"]),
+                            sales_count=int(item["sales_count"]),
+                            guard_level=str(item["guard_level"]),
+                            guard_reason=str(item["guard_reason"])[:500],
+                            status="blocked" if item["guard_level"] == "BLOCKED" else "pending",
+                            error=str(item["guard_reason"])[:1000] if item["guard_level"] == "BLOCKED" else "",
+                        )
+                    )
+                db.commit()
 
     retry_sqlite_write(_write, attempts=8)
     return batch_key
-
 
 def _update_batch_item(
     batch_key: str,
