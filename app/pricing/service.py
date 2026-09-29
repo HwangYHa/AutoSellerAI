@@ -479,23 +479,23 @@ def _log_change(row: dict[str, Any], status: str, error: str = "") -> int:
     ensure_pricing_schema()
     def _write() -> int:
         with get_db() as db:
-            log = PriceChangeLog(
-                product_id=int(row["product_id"]),
-                listing_id=int(row["listing_id"]),
-                platform=str(row["platform"]),
-                platform_id=str(row["platform_id"]),
-                supply_price=float(row["supply_price"]),
-                fee_rate=float(row["fee_rate"]),
-                target_margin_rate=float(row["target_margin_rate"]),
-                before_price=float(row["before_price"]),
-                after_price=float(row["after_price"]),
-                status=status,
-                error=str(error or "")[:1000],
-            )
-            db.add(log)
-            db.commit()
-            db.refresh(log)
-            return int(log.id)
+            with sqlite_writer_guard(db):
+                log = PriceChangeLog(
+                    product_id=int(row["product_id"]),
+                    listing_id=int(row["listing_id"]),
+                    platform=str(row["platform"]),
+                    platform_id=str(row["platform_id"]),
+                    supply_price=float(row["supply_price"]),
+                    fee_rate=float(row["fee_rate"]),
+                    target_margin_rate=float(row["target_margin_rate"]),
+                    before_price=float(row["before_price"]),
+                    after_price=float(row["after_price"]),
+                    status=status,
+                    error=str(error or "")[:1000],
+                )
+                db.add(log)
+                db.commit()
+                return int(log.id)
     return retry_sqlite_write(_write, attempts=8)
 
 
