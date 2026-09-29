@@ -14,7 +14,7 @@ from app.pricing.models import (
     PriceRollbackLog,
     ensure_pricing_schema,
 )
-from app.sqlite_runtime import retry_sqlite_write
+from app.sqlite_runtime import retry_sqlite_write, sqlite_writer_guard
 
 
 DEFAULT_UP_THRESHOLD_PCT = 20.0
@@ -196,17 +196,18 @@ def _update_batch_item(
 ) -> None:
     def _write() -> None:
         with get_db() as db:
-            item = (
-                db.query(PriceChangeBatchItem)
-                .filter_by(batch_key=batch_key, listing_id=int(listing_id))
-                .first()
-            )
-            if item:
-                item.status = status
-                item.price_change_log_id = change_log_id
-                item.error = str(error or "")[:1000]
-                db.add(item)
-            db.commit()
+            with sqlite_writer_guard(db):
+                item = (
+                    db.query(PriceChangeBatchItem)
+                    .filter_by(batch_key=batch_key, listing_id=int(listing_id))
+                    .first()
+                )
+                if item:
+                    item.status = status
+                    item.price_change_log_id = change_log_id
+                    item.error = str(error or "")[:1000]
+                    db.add(item)
+                db.commit()
 
     retry_sqlite_write(_write, attempts=8)
 
@@ -216,14 +217,15 @@ def _finish_batch(batch_key: str, success: int, failed: int) -> None:
 
     def _write() -> None:
         with get_db() as db:
-            batch = db.query(PriceChangeBatch).filter_by(batch_key=batch_key).first()
-            if batch:
-                batch.success_count = int(success)
-                batch.failed_count = int(failed)
-                batch.status = "completed" if failed == 0 else "partial"
-                batch.finished_at = datetime.utcnow()
-                db.add(batch)
-            db.commit()
+            with sqlite_writer_guard(db):
+                batch = db.query(PriceChangeBatch).filter_by(batch_key=batch_key).first()
+                if batch:
+                    batch.success_count = int(success)
+                    batch.failed_count = int(failed)
+                    batch.status = "completed" if failed == 0 else "partial"
+                    batch.finished_at = datetime.utcnow()
+                    db.add(batch)
+                db.commit()
 
     retry_sqlite_write(_write, attempts=8)
 
@@ -338,7 +340,8 @@ def _record_rollback(
 ) -> int:
     def _write() -> int:
         with get_db() as db:
-            log = PriceRollbackLog(
+            with sqlite_writer_guard(db):
+                log = PriceRollbackLog(
                 source_change_log_id=int(source.id),
                 source_batch_key=source_batch_key,
                 product_id=int(source.product_id),
@@ -350,10 +353,9 @@ def _record_rollback(
                 status=status,
                 error=str(error or "")[:1000],
             )
-            db.add(log)
-            db.commit()
-            db.refresh(log)
-            return int(log.id)
+                db.add(log)
+                db.commit()
+                return int(log.id)
 
     return retry_sqlite_write(_write, attempts=8)
 
