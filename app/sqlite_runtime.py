@@ -2,8 +2,8 @@
 
 AutoSellerAI runs several Docker processes against the same SQLite file
 (Streamlit, APIs, workers and schedulers). SQLite permits many readers but only
-one writer. WAL and busy_timeout reduce contention, while a shared file mutex
-serializes ORM writers across containers that mount the same data directory.
+one writer. WAL and busy_timeout reduce contention, while Redis plus a local/file
+mutex serializes ORM writers across containers that mount the same data directory.
 
 ``PRAGMA journal_mode=WAL`` is database-wide, so it must not run on every pooled
 DBAPI connection. The runtime lazily enables WAL once per SQLAlchemy Engine on
@@ -186,7 +186,7 @@ def _redis_writer_lock(database_path: Path) -> Any | None:
 def _acquire_database_file_lock(database_path: Path) -> _WriterLockHandle:
     """Acquire one writer mutex across threads, containers and the DB filesystem."""
     _process_writer_lock.acquire()
-    lock_fd: _WriterLockHandle | None = None
+    lock_fd: int | None = None
     distributed_lock: Any | None = None
     try:
         distributed_lock = _redis_writer_lock(database_path)
@@ -436,7 +436,7 @@ def _create_all_with_retry(
     database_path = _engine_database_path(engine) if isinstance(engine, Engine) else None
 
     for attempt, delay in enumerate(_SCHEMA_RETRY_DELAYS):
-        lock_fd: int | None = None
+        lock_fd: _WriterLockHandle | None = None
         try:
             if database_path is not None:
                 lock_fd = _acquire_database_file_lock(database_path)
