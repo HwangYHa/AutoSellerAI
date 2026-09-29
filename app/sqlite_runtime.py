@@ -13,6 +13,8 @@ that use ``app.db`` directly and never call Seller OS ``configure_database()``.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import dataclass
+import hashlib
 import os
 import threading
 import time
@@ -26,6 +28,11 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.schema import MetaData
 
+try:
+    import redis  # type: ignore
+except Exception:  # pragma: no cover - dependency/runtime fallback
+    redis = None  # type: ignore
+
 try:  # Linux/Docker/CI: real cross-process locking.
     import fcntl  # type: ignore
 except ImportError:  # pragma: no cover - Windows host fallback.
@@ -38,6 +45,8 @@ _SCHEMA_RETRY_DELAYS = (0.05, 0.10, 0.20, 0.40, 0.80, 1.60)
 _WRITE_RETRY_DELAYS = (0.05, 0.10, 0.20, 0.40, 0.80)
 _WAL_RETRY_DELAYS = (0.10, 0.20, 0.40, 0.80, 1.60)
 _SESSION_LOCK_KEY = "_autoseller_sqlite_writer_lock"
+_REDIS_LOCK_TIMEOUT_SECONDS = 180
+_REDIS_BLOCKING_TIMEOUT_SECONDS = 60
 _installed = False
 _original_create_all = MetaData.create_all
 
@@ -48,6 +57,14 @@ _process_writer_lock = threading.RLock()
 _wal_file_lock = threading.RLock()
 _wal_init_lock = threading.Lock()
 _wal_initialized_engines: "weakref.WeakSet[Engine]" = weakref.WeakSet()
+_redis_client: Any | None = None
+_redis_client_init_attempted = False
+
+
+@dataclass
+class _WriterLockHandle:
+    file_fd: int
+    redis_lock: Any | None = None
 
 
 def is_sqlite_contention_error(exc: BaseException) -> bool:
@@ -123,40 +140,102 @@ def _sqlite_database_path(session: Session) -> Path | None:
         return None
 
 
-def _acquire_database_file_lock(database_path: Path) -> int:
-    """Acquire the shared writer mutex for one SQLite database file."""
-    _process_writer_lock.acquire()
-    lock_fd: int | None = None
+def _get_redis_client() -> Any | None:
+    """Return the shared Redis client when Docker/runtime Redis is available.
+
+    Docker Desktop bind mounts can provide weaker advisory-file-lock semantics
+    than a native Linux filesystem. Redis therefore acts as the primary
+    cross-container writer mutex when REDIS_URL is configured; flock remains a
+    local/filesystem fallback and second line of defence.
+    """
+    global _redis_client, _redis_client_init_attempted
+    if _redis_client_init_attempted:
+        return _redis_client
+    _redis_client_init_attempted = True
+
+    redis_url = str(os.getenv("REDIS_URL") or "").strip()
+    if not redis_url or redis is None:
+        return None
     try:
+        client = redis.Redis.from_url(
+            redis_url,
+            socket_connect_timeout=1.5,
+            socket_timeout=2.0,
+            health_check_interval=30,
+        )
+        client.ping()
+        _redis_client = client
+    except Exception:
+        _redis_client = None
+    return _redis_client
+
+
+def _redis_writer_lock(database_path: Path) -> Any | None:
+    client = _get_redis_client()
+    if client is None:
+        return None
+    digest = hashlib.sha256(str(database_path).encode("utf-8")).hexdigest()[:24]
+    return client.lock(
+        f"autoseller:sqlite-writer:{digest}",
+        timeout=_REDIS_LOCK_TIMEOUT_SECONDS,
+        blocking_timeout=_REDIS_BLOCKING_TIMEOUT_SECONDS,
+        thread_local=False,
+    )
+
+
+def _acquire_database_file_lock(database_path: Path) -> _WriterLockHandle:
+    """Acquire one writer mutex across threads, containers and the DB filesystem."""
+    _process_writer_lock.acquire()
+    lock_fd: _WriterLockHandle | None = None
+    distributed_lock: Any | None = None
+    try:
+        distributed_lock = _redis_writer_lock(database_path)
+        if distributed_lock is not None:
+            acquired = bool(distributed_lock.acquire(blocking=True))
+            if not acquired:
+                raise TimeoutError("Timed out waiting for AutoSellerAI SQLite distributed writer lock.")
+
         lock_path = Path(f"{database_path}.write.lock")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
         if fcntl is not None:
-            # Blocking flock has no arbitrary timeout window. A short writer waits
-            # until the previous writer actually commits/rolls back.
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        return lock_fd
+        return _WriterLockHandle(file_fd=lock_fd, redis_lock=distributed_lock)
     except Exception:
         if lock_fd is not None:
             try:
                 os.close(lock_fd)
             except OSError:
                 pass
+        if distributed_lock is not None:
+            try:
+                if distributed_lock.owned():
+                    distributed_lock.release()
+            except Exception:
+                pass
         _process_writer_lock.release()
         raise
 
 
-def _release_database_file_lock(lock_fd: int) -> None:
+def _release_database_file_lock(lock_handle: _WriterLockHandle) -> None:
     try:
         if fcntl is not None:
             try:
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                fcntl.flock(lock_handle.file_fd, fcntl.LOCK_UN)
             except OSError:
                 pass
         try:
-            os.close(lock_fd)
+            os.close(lock_handle.file_fd)
         except OSError:
             pass
+        if lock_handle.redis_lock is not None:
+            try:
+                if lock_handle.redis_lock.owned():
+                    lock_handle.redis_lock.release()
+            except Exception:
+                # Redis loss must not strand the local mutex. The Redis lease has
+                # a finite TTL, so another process can recover even after failure.
+                pass
     finally:
         _process_writer_lock.release()
 
@@ -297,15 +376,15 @@ def _acquire_writer_lock(session: Session, _flush_context: Any, _instances: Any)
     if database_path is None:
         return
 
-    lock_fd = _acquire_database_file_lock(database_path)
-    session.info[_SESSION_LOCK_KEY] = lock_fd
+    lock_handle = _acquire_database_file_lock(database_path)
+    session.info[_SESSION_LOCK_KEY] = lock_handle
 
 
 def _release_writer_lock(session: Session, *_args: Any) -> None:
-    lock_fd = session.info.pop(_SESSION_LOCK_KEY, None)
-    if lock_fd is None:
+    lock_handle = session.info.pop(_SESSION_LOCK_KEY, None)
+    if lock_handle is None:
         return
-    _release_database_file_lock(lock_fd)
+    _release_database_file_lock(lock_handle)
 
 
 @contextmanager
@@ -327,9 +406,14 @@ def sqlite_writer_guard(session: Session):
         yield session
         return
 
-    lock_fd = _acquire_database_file_lock(database_path)
-    session.info[_SESSION_LOCK_KEY] = lock_fd
+    lock_handle = _acquire_database_file_lock(database_path)
+    session.info[_SESSION_LOCK_KEY] = lock_handle
     try:
+        # Reserve the SQLite writer slot before any caller SELECT. This removes
+        # WAL read-to-write upgrade races even if another component bypasses the
+        # ORM event hook. SQLAlchemy will keep this transaction until commit.
+        if not session.in_transaction():
+            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
         yield session
     finally:
         # after_commit/after_rollback may already have released it.
