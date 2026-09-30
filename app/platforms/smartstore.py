@@ -463,7 +463,12 @@ class SmartStoreUploader:
         try:
             canonical, payload, error = self._get_origin_product(origin_product_no)
             if error:
-                return {"ok": False, "error": error}
+                not_found = (
+                    "현재 상품목록에 존재하지 않는 상품" in error
+                    or "삭제된 상품" in error
+                    or "존재하지 않는 상품" in error
+                )
+                return {"ok": False, "error": error, "not_found": not_found}
             origin = payload.get("originProduct") or payload
             price = int(origin.get("salePrice") or 0)
             if price <= 0:
