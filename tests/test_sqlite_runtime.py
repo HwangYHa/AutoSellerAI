@@ -266,29 +266,16 @@ def test_writer_guard_starts_begin_immediate_before_reads(tmp_path):
     assert begin_index < select_index
 
 
-def test_writer_lock_uses_redis_when_available_and_releases_it(tmp_path, monkeypatch):
+def test_writer_lock_is_filesystem_based_without_distributed_timeout(tmp_path):
     import app.sqlite_runtime as runtime
 
-    class FakeRedisLock:
-        def __init__(self):
-            self.acquired = False
-            self.released = False
+    handle = runtime._acquire_database_file_lock(tmp_path / "writer-lock.db")
+    try:
+        assert handle.file_fd >= 0
+        assert not hasattr(handle, "redis_lock")
+    finally:
+        runtime._release_database_file_lock(handle)
 
-        def acquire(self, blocking=True):
-            assert blocking is True
-            self.acquired = True
-            return True
-
-        def owned(self):
-            return self.acquired and not self.released
-
-        def release(self):
-            self.released = True
-
-    fake_lock = FakeRedisLock()
-    monkeypatch.setattr(runtime, "_redis_writer_lock", lambda _path: fake_lock)
-
-    handle = runtime._acquire_database_file_lock(tmp_path / "redis-lock.db")
-    assert fake_lock.acquired is True
-    runtime._release_database_file_lock(handle)
-    assert fake_lock.released is True
+    source = __import__("inspect").getsource(runtime._acquire_database_file_lock)
+    assert "Timed out waiting for AutoSellerAI SQLite distributed writer lock" not in source
+    assert "flock" in source
