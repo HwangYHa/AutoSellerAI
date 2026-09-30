@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy import desc, func
 from sqlalchemy.exc import OperationalError
 
-from app.db import Order, PlatformOrder, Product, get_db
+from app.db import Listing, Order, PlatformOrder, Product, get_db
 from app.pricing.models import (
     PriceChangeBatch,
     PriceChangeBatchItem,
@@ -359,7 +359,7 @@ def _record_rollback(
     source_batch_key: str,
     status: str,
     error: str = "",
-) -> int:
+) -> int | None:
     def _write() -> int:
         with get_db() as db:
             with sqlite_writer_guard(db):
@@ -379,7 +379,30 @@ def _record_rollback(
                 db.commit()
                 return int(log.id)
 
-    return retry_sqlite_write(_write, attempts=8)
+    try:
+        return retry_sqlite_write(_write, attempts=8)
+    except OperationalError:
+        # Rollback audit logging is secondary. Never turn a safe rollback block
+        # into a Streamlit traceback just because the audit row is temporarily busy.
+        return None
+
+def _mark_listing_stale_best_effort(listing_id: int, error: str) -> None:
+    def _write() -> None:
+        with get_db() as db:
+            with sqlite_writer_guard(db):
+                listing = db.get(Listing, int(listing_id))
+                if listing is None:
+                    return
+                listing.status = "stale"
+                listing.error = str(error or "")[:500]
+                db.add(listing)
+                db.commit()
+
+    try:
+        retry_sqlite_write(_write, attempts=8)
+    except OperationalError:
+        pass
+
 
 def rollback_change(change_log_id: int) -> dict[str, Any]:
     ensure_pricing_schema()
@@ -420,10 +443,26 @@ def rollback_change(change_log_id: int) -> dict[str, Any]:
     live = _remote_current_price(snapshot["platform"], snapshot["platform_id"])
     if not live.get("ok"):
         error = f"롤백 전 현재가 확인 실패: {live.get('error') or '알 수 없는 오류'}"
+        if live.get("not_found"):
+            _mark_listing_stale_best_effort(snapshot["listing_id"], error)
         with get_db() as db:
             source = db.get(PriceChangeLog, snapshot["id"])
-            rollback_id = _record_rollback(source, source_batch_key=snapshot["batch_key"], status="failed", error=error)
-        return {"ok": False, "error": error, "rollback_id": rollback_id}
+            rollback_id = (
+                _record_rollback(
+                    source,
+                    source_batch_key=snapshot["batch_key"],
+                    status="failed",
+                    error=error,
+                )
+                if source is not None
+                else None
+            )
+        return {
+            "ok": False,
+            "error": error,
+            "rollback_id": rollback_id,
+            "not_found": bool(live.get("not_found")),
+        }
 
     live_price = float(live.get("price") or 0)
     if abs(live_price - snapshot["after_price"]) >= 1:
@@ -433,7 +472,16 @@ def rollback_change(change_log_id: int) -> dict[str, Any]:
         )
         with get_db() as db:
             source = db.get(PriceChangeLog, snapshot["id"])
-            rollback_id = _record_rollback(source, source_batch_key=snapshot["batch_key"], status="blocked", error=error)
+            rollback_id = (
+                _record_rollback(
+                    source,
+                    source_batch_key=snapshot["batch_key"],
+                    status="blocked",
+                    error=error,
+                )
+                if source is not None
+                else None
+            )
         return {
             "ok": False,
             "blocked": True,
