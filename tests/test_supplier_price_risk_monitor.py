@@ -68,3 +68,20 @@ def test_high_margin_is_review_not_automatic_problem():
     )
     assert level == "REVIEW"
     assert "가격 경쟁력" in reason
+
+
+def test_supplier_refresh_failure_journal_is_best_effort():
+    import inspect
+    from app.pricing import supply_monitor
+
+    source = inspect.getsource(supply_monitor._record_refresh_failure)
+    assert "except OperationalError" in source
+    assert "return False" in source
+
+
+def test_price_risk_snapshot_write_uses_writer_guard():
+    import inspect
+    from app.pricing import supply_monitor
+
+    source = inspect.getsource(supply_monitor.persist_price_risks)
+    assert "sqlite_writer_guard" in source
