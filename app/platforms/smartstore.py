@@ -312,72 +312,173 @@ class SmartStoreUploader:
             return {"ok": False, "error": f"HTTP {r.status_code}: {r.text[:200]}"}
         except Exception as exc: return {"ok": False, "error": str(exc)}
 
-    def update_stock(self, origin_product_no: str, channel_product_no: str, qty: int) -> dict:
+    def resolve_origin_product_no(self, product_no: str, *, max_pages: int = 50) -> str:
+        """Resolve either an origin-product number or SmartStore channel-product number.
+
+        Historical AutoSellerAI rows may contain a channelProductNo in Listing.platform_id.
+        The current Commerce API origin-product endpoints require originProductNo, so on
+        a 404 we scan the official product-search API and translate the stored identifier.
+        """
         self._ensure_token()
+        target = str(product_no or "").strip()
+        if not target:
+            return ""
+
+        # Fast path: it is already a valid originProductNo.
+        direct = httpx.get(
+            f"{API}/v2/products/origin-products/{target}",
+            headers=self._headers(),
+            timeout=15,
+        )
+        if direct.status_code == 200:
+            return target
+        if direct.status_code not in (404,):
+            return ""
+
+        for page in range(1, max(1, int(max_pages)) + 1):
+            response = httpx.post(
+                f"{API}/v1/products/search",
+                headers=self._headers(),
+                json={"page": page, "size": 500, "orderType": "MOD_DATE"},
+                timeout=30,
+            )
+            if response.status_code != 200:
+                return ""
+            data = response.json()
+            contents = data.get("contents") or []
+            if not isinstance(contents, list) or not contents:
+                break
+
+            for row in contents:
+                origin_no = str(row.get("originProductNo") or "").strip()
+                channels = row.get("channelProducts") or []
+                aliases = {origin_no}
+                aliases.update(
+                    str(channel.get(key) or "").strip()
+                    for channel in channels
+                    if isinstance(channel, dict)
+                    for key in ("originProductNo", "channelProductNo", "smartstoreChannelProductNo")
+                )
+                aliases.update(
+                    str(row.get(key) or "").strip()
+                    for key in ("channelProductNo", "smartstoreChannelProductNo")
+                )
+                aliases.discard("")
+                if target in aliases and origin_no:
+                    return origin_no
+
+            total_pages = int(data.get("totalPages") or 0)
+            if data.get("last") is True or (total_pages and page >= total_pages):
+                break
+            if len(contents) < 500 and not total_pages:
+                break
+        return ""
+
+    def _get_origin_product(self, product_no: str) -> tuple[str, dict[str, Any], str]:
+        """Return (canonical originProductNo, payload, error)."""
+        self._ensure_token()
+        requested = str(product_no or "").strip()
+        if not requested:
+            return "", {}, "스마트스토어 상품번호가 비어 있습니다."
+
+        path = f"{API}/v2/products/origin-products/{requested}"
+        response = httpx.get(path, headers=self._headers(), timeout=15)
+        canonical = requested
+        if response.status_code == 404:
+            canonical = self.resolve_origin_product_no(requested)
+            if canonical and canonical != requested:
+                response = httpx.get(
+                    f"{API}/v2/products/origin-products/{canonical}",
+                    headers=self._headers(),
+                    timeout=15,
+                )
+
+        if response.status_code != 200:
+            return (
+                canonical or requested,
+                {},
+                f"상품 조회 실패 HTTP {response.status_code}: {response.text[:200]}",
+            )
+        return canonical, response.json(), ""
+
+    def update_stock(self, origin_product_no: str, channel_product_no: str, qty: int) -> dict:
         try:
-            r_get = httpx.get(f"{API}/v2/products/{origin_product_no}", headers=self._headers(), timeout=15)
-            if r_get.status_code != 200: return {"ok": False, "error": f"상품 조회 실패 HTTP {r_get.status_code}"}
-            payload = r_get.json(); payload.get("originProduct", {})["stockQuantity"] = qty
-            r_put = httpx.put(f"{API}/v2/products/{origin_product_no}", headers=self._headers(), json=payload, timeout=30)
-            if r_put.status_code in (200, 201): return {"ok": True}
+            canonical, payload, error = self._get_origin_product(origin_product_no)
+            if error:
+                return {"ok": False, "error": error}
+            origin = payload.get("originProduct") or payload
+            origin["stockQuantity"] = max(0, int(qty))
+            r_put = httpx.put(
+                f"{API}/v2/products/origin-products/{canonical}",
+                headers=self._headers(),
+                json=payload,
+                timeout=30,
+            )
+            if r_put.status_code in (200, 201):
+                return {"ok": True, "origin_product_no": canonical}
             return {"ok": False, "error": f"HTTP {r_put.status_code}: {r_put.text[:200]}"}
-        except Exception as exc: return {"ok": False, "error": str(exc)}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
 
     def get_current_price(self, origin_product_no: str) -> dict:
-        """Return the live origin-product sale price for rollback/drift checks."""
-        self._ensure_token()
+        """Return the live sale price and canonical origin-product number."""
         try:
-            current_path = f"{API}/v2/products/origin-products/{origin_product_no}"
-            legacy_path = f"{API}/v2/products/{origin_product_no}"
-            r_get = httpx.get(current_path, headers=self._headers(), timeout=15)
-            if r_get.status_code == 404:
-                r_get = httpx.get(legacy_path, headers=self._headers(), timeout=15)
-            if r_get.status_code != 200:
-                return {"ok": False, "error": f"상품 조회 실패 HTTP {r_get.status_code}: {r_get.text[:200]}"}
-            payload = r_get.json()
+            canonical, payload, error = self._get_origin_product(origin_product_no)
+            if error:
+                return {"ok": False, "error": error}
             origin = payload.get("originProduct") or payload
             price = int(origin.get("salePrice") or 0)
             if price <= 0:
                 return {"ok": False, "error": "스마트스토어 현재 판매가를 찾지 못했습니다."}
-            return {"ok": True, "price": price}
+            return {"ok": True, "price": price, "origin_product_no": canonical}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
     def update_price(self, origin_product_no: str, price: int) -> dict:
-        """Update an origin product sale price using the current Commerce API path."""
-        self._ensure_token()
+        """Update an origin product sale price using the canonical current endpoint."""
         try:
-            current_path = f"{API}/v2/products/origin-products/{origin_product_no}"
-            legacy_path = f"{API}/v2/products/{origin_product_no}"
-            r_get = httpx.get(current_path, headers=self._headers(), timeout=15)
-            use_path = current_path
-            if r_get.status_code == 404:
-                r_get = httpx.get(legacy_path, headers=self._headers(), timeout=15)
-                use_path = legacy_path
-            if r_get.status_code != 200:
-                return {"ok": False, "error": f"상품 조회 실패 HTTP {r_get.status_code}: {r_get.text[:200]}"}
-            payload = r_get.json()
+            canonical, payload, error = self._get_origin_product(origin_product_no)
+            if error:
+                return {"ok": False, "error": error}
             origin = payload.get("originProduct") or payload
             origin["salePrice"] = (max(10, int(price)) // 10) * 10 or 10
-            r_put = httpx.put(use_path, headers=self._headers(), json=payload, timeout=30)
+            r_put = httpx.put(
+                f"{API}/v2/products/origin-products/{canonical}",
+                headers=self._headers(),
+                json=payload,
+                timeout=30,
+            )
             if r_put.status_code in (200, 201):
-                return {"ok": True, "price": origin["salePrice"]}
+                return {
+                    "ok": True,
+                    "price": origin["salePrice"],
+                    "origin_product_no": canonical,
+                }
             return {"ok": False, "error": f"HTTP {r_put.status_code}: {r_put.text[:300]}"}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
     def update_product_content(self, origin_product_no: str, name: str | None = None, detail_html: str | None = None) -> dict:
-        self._ensure_token()
         try:
-            r_get = httpx.get(f"{API}/v2/products/{origin_product_no}", headers=self._headers(), timeout=15)
-            if r_get.status_code != 200: return {"ok": False, "error": f"상품 조회 실패 HTTP {r_get.status_code}"}
-            payload = r_get.json(); origin = payload.get("originProduct", {})
-            if name: origin["name"] = name[:100]
-            if detail_html: origin["detailContent"] = detail_html
-            r_put = httpx.put(f"{API}/v2/products/{origin_product_no}", headers=self._headers(), json=payload, timeout=30)
-            if r_put.status_code in (200, 201): return {"ok": True}
+            canonical, payload, error = self._get_origin_product(origin_product_no)
+            if error:
+                return {"ok": False, "error": error}
+            origin = payload.get("originProduct") or payload
+            if name:
+                origin["name"] = name[:100]
+            if detail_html:
+                origin["detailContent"] = detail_html
+            r_put = httpx.put(
+                f"{API}/v2/products/origin-products/{canonical}",
+                headers=self._headers(),
+                json=payload,
+                timeout=30,
+            )
+            if r_put.status_code in (200, 201):
+                return {"ok": True, "origin_product_no": canonical}
             return {"ok": False, "error": f"HTTP {r_put.status_code}: {r_put.text[:200]}"}
-        except Exception as exc: return {"ok": False, "error": str(exc)}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
 
     def list_origin_products(self, max_pages: int = 20, page_size: int = 50) -> list[dict]:
         self._ensure_token(); results: list[dict] = []

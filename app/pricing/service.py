@@ -362,28 +362,57 @@ def _fetch_coupang_prices(platform_ids: set[str]) -> dict[str, dict[str, Any]]:
 
 
 def _fetch_smartstore_prices(platform_ids: set[str]) -> dict[str, dict[str, Any]]:
+    """Resolve both originProductNo and historical channelProductNo identifiers."""
     from app.sync.catalog_sync import _smartstore_search_page
     from app.platforms.smartstore import get_smartstore_uploader
+
     uploader = get_smartstore_uploader()
     result: dict[str, dict[str, Any]] = {}
+    wanted = {str(x or "").strip() for x in platform_ids if str(x or "").strip()}
+
     for page in range(1, 51):
         data = _smartstore_search_page(uploader, page, 500)
         contents = data.get("contents") or []
         if not contents:
             break
+
         for row in contents:
             origin_no = str(row.get("originProductNo") or "").strip()
             channels = row.get("channelProducts") or []
-            channel = next((x for x in channels if x.get("channelServiceType") == "STOREFARM"), channels[0] if channels else {})
+            channel = next(
+                (x for x in channels if x.get("channelServiceType") == "STOREFARM"),
+                channels[0] if channels else {},
+            )
             if not origin_no:
                 origin_no = str(channel.get("originProductNo") or "").strip()
-            if origin_no in platform_ids:
-                result[origin_no] = {
-                    "price": float(channel.get("salePrice") or row.get("salePrice") or 0),
-                    "category": str(channel.get("categoryId") or channel.get("wholeCategoryName") or ""),
-                    "error": "",
-                }
-        if platform_ids.issubset(result.keys()):
+
+            aliases = {origin_no}
+            aliases.update(
+                str(channel_row.get(key) or "").strip()
+                for channel_row in channels
+                if isinstance(channel_row, dict)
+                for key in ("originProductNo", "channelProductNo", "smartstoreChannelProductNo")
+            )
+            aliases.update(
+                str(row.get(key) or "").strip()
+                for key in ("channelProductNo", "smartstoreChannelProductNo")
+            )
+            aliases.discard("")
+
+            matched = aliases & wanted
+            if not matched:
+                continue
+
+            value = {
+                "price": float(channel.get("salePrice") or row.get("salePrice") or 0),
+                "category": str(channel.get("categoryId") or channel.get("wholeCategoryName") or ""),
+                "error": "",
+                "origin_product_no": origin_no,
+            }
+            for alias in matched:
+                result[alias] = value
+
+        if wanted.issubset(result.keys()):
             break
         total_pages = int(data.get("totalPages") or 0)
         if data.get("last") is True or (total_pages and page >= total_pages):
@@ -499,6 +528,37 @@ def _log_change(row: dict[str, Any], status: str, error: str = "") -> int:
     return retry_sqlite_write(_write, attempts=8)
 
 
+def _repair_listing_platform_id(listing_id: int, platform: str, canonical_id: str) -> None:
+    canonical_id = str(canonical_id or "").strip()
+    if not canonical_id:
+        return
+
+    def _write() -> None:
+        with get_db() as db:
+            with sqlite_writer_guard(db):
+                listing = db.get(Listing, int(listing_id))
+                if listing is None or listing.platform != platform:
+                    return
+                if str(listing.platform_id or "") == canonical_id:
+                    return
+                duplicate = (
+                    db.query(Listing.id)
+                    .filter(
+                        Listing.platform == platform,
+                        Listing.platform_id == canonical_id,
+                        Listing.id != listing.id,
+                    )
+                    .first()
+                )
+                if duplicate:
+                    return
+                listing.platform_id = canonical_id
+                db.add(listing)
+                db.commit()
+
+    retry_sqlite_write(_write, attempts=8)
+
+
 def apply_price(row: PriceRow, new_price: int | None = None) -> dict[str, Any]:
     price = int(new_price or row.target_price)
     payload = {
@@ -526,8 +586,17 @@ def apply_price(row: PriceRow, new_price: int | None = None) -> dict[str, Any]:
         result = {"ok": False, "error": str(exc)}
 
     if result.get("ok"):
+        canonical_id = str(result.get("origin_product_no") or "").strip()
+        if row.platform == "smartstore" and canonical_id and canonical_id != str(row.platform_id):
+            _repair_listing_platform_id(row.listing_id, row.platform, canonical_id)
         log_id = _log_change(payload, "success")
-        return {"ok": True, "listing_id": row.listing_id, "price": price, "change_log_id": log_id}
+        return {
+            "ok": True,
+            "listing_id": row.listing_id,
+            "price": price,
+            "change_log_id": log_id,
+            **({"origin_product_no": canonical_id} if canonical_id else {}),
+        }
     error = str(result.get("error") or "가격 수정 실패")
     log_id = _log_change(payload, "failed", error)
     return {"ok": False, "listing_id": row.listing_id, "error": error, "change_log_id": log_id}
