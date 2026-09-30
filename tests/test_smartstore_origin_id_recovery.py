@@ -20,16 +20,16 @@ def _uploader(monkeypatch) -> SmartStoreUploader:
     return uploader
 
 
-def test_resolve_origin_product_no_from_channel_product_no(monkeypatch):
+def test_resolve_origin_product_no_from_channel_product_no_uses_exact_search(monkeypatch):
     uploader = _uploader(monkeypatch)
-    calls: list[tuple[str, str]] = []
-
-    def fake_get(url, **kwargs):
-        calls.append(("GET", url))
-        return _Resp(404, {"code": "GW.NOT_FOUND"})
+    bodies: list[dict] = []
 
     def fake_post(url, **kwargs):
-        calls.append(("POST", url))
+        assert url == f"{API}/v1/products/search"
+        bodies.append(kwargs["json"])
+        body = kwargs["json"]
+        if body["searchKeywordType"] == "PRODUCT_NO":
+            return _Resp(200, {"contents": [], "last": True})
         return _Resp(200, {
             "contents": [{
                 "originProductNo": 1234567890,
@@ -42,12 +42,13 @@ def test_resolve_origin_product_no_from_channel_product_no(monkeypatch):
             "last": True,
         })
 
-    monkeypatch.setattr("app.platforms.smartstore.httpx.get", fake_get)
     monkeypatch.setattr("app.platforms.smartstore.httpx.post", fake_post)
 
     assert uploader.resolve_origin_product_no("9988776655") == "1234567890"
-    assert ("GET", f"{API}/v2/products/origin-products/9988776655") in calls
-    assert ("POST", f"{API}/v1/products/search") in calls
+    assert bodies[0]["searchKeywordType"] == "PRODUCT_NO"
+    assert bodies[0]["originProductNos"] == [9988776655]
+    assert bodies[1]["searchKeywordType"] == "CHANNEL_PRODUCT_NO"
+    assert bodies[1]["channelProductNos"] == [9988776655]
 
 
 def test_get_current_price_recovers_channel_id_to_origin_id(monkeypatch):
@@ -55,7 +56,7 @@ def test_get_current_price_recovers_channel_id_to_origin_id(monkeypatch):
 
     def fake_get(url, **kwargs):
         if url.endswith("/9988776655"):
-            return _Resp(404, {"code": "GW.NOT_FOUND"})
+            return _Resp(404, {"code": "NOT_FOUND"})
         if url.endswith("/1234567890"):
             return _Resp(200, {
                 "originProduct": {"salePrice": 15900},
@@ -66,8 +67,13 @@ def test_get_current_price_recovers_channel_id_to_origin_id(monkeypatch):
     monkeypatch.setattr("app.platforms.smartstore.httpx.get", fake_get)
     monkeypatch.setattr(
         uploader,
-        "resolve_origin_product_no",
-        lambda product_no, max_pages=50: "1234567890",
+        "_search_product_identity",
+        lambda product_no: {
+            "found": True,
+            "origin_product_no": "1234567890",
+            "channel_product_no": "9988776655",
+            "status": "SALE",
+        },
     )
 
     result = uploader.get_current_price("9988776655")
@@ -76,6 +82,29 @@ def test_get_current_price_recovers_channel_id_to_origin_id(monkeypatch):
         "price": 15900,
         "origin_product_no": "1234567890",
     }
+
+
+def test_get_current_price_classifies_truly_missing_product(monkeypatch):
+    uploader = _uploader(monkeypatch)
+    monkeypatch.setattr(
+        "app.platforms.smartstore.httpx.get",
+        lambda *args, **kwargs: _Resp(404, {"code": "NOT_FOUND", "message": "존재하지 않는 상품입니다."}),
+    )
+    monkeypatch.setattr(
+        uploader,
+        "_search_product_identity",
+        lambda product_no: {
+            "found": False,
+            "origin_product_no": "",
+            "channel_product_no": "",
+            "status": "",
+        },
+    )
+
+    result = uploader.get_current_price("9988776655")
+    assert result["ok"] is False
+    assert result["not_found"] is True
+    assert "현재 상품목록에 존재하지 않는 상품" in result["error"]
 
 
 def test_update_price_uses_current_origin_product_endpoint_after_recovery(monkeypatch):

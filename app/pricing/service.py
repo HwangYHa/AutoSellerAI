@@ -417,7 +417,73 @@ def _fetch_smartstore_prices(platform_ids: set[str]) -> dict[str, dict[str, Any]
         total_pages = int(data.get("totalPages") or 0)
         if data.get("last") is True or (total_pages and page >= total_pages):
             break
+
+    # Historical listings can contain a channelProductNo or a stale identifier.
+    # Resolve only the unmatched IDs through the adapter's exact PRODUCT_NO /
+    # CHANNEL_PRODUCT_NO search. Never fall back to local price on a live 404.
+    for missing_id in sorted(wanted - set(result.keys())):
+        live = uploader.get_current_price(missing_id)
+        if live.get("ok"):
+            result[missing_id] = {
+                "price": float(live.get("price") or 0),
+                "category": "",
+                "error": "",
+                "origin_product_no": str(live.get("origin_product_no") or missing_id),
+            }
+        else:
+            result[missing_id] = {
+                "price": 0.0,
+                "category": "",
+                "error": str(live.get("error") or "스마트스토어 현재 상품 조회 실패"),
+                "origin_product_no": "",
+            }
     return result
+
+
+def _reconcile_live_listing_identity(local: list[dict[str, Any]], by_platform: dict[str, dict[str, dict[str, Any]]]) -> None:
+    """Repair canonical SmartStore IDs and quarantine confirmed stale listings."""
+    actions: list[tuple[int, str, str, str]] = []
+    for item in local:
+        platform = str(item.get("platform") or "")
+        platform_id = str(item.get("platform_id") or "")
+        remote = by_platform.get(platform, {}).get(platform_id, {})
+        canonical = str(remote.get("origin_product_no") or "").strip()
+        error = str(remote.get("error") or "").strip()
+
+        if platform == "smartstore" and canonical and canonical != platform_id:
+            actions.append((int(item["listing_id"]), "repair", canonical, ""))
+        elif platform == "smartstore" and (
+            "현재 상품목록에 존재하지 않는 상품" in error
+            or "삭제된 상품" in error
+        ):
+            actions.append((int(item["listing_id"]), "stale", "", error))
+
+    for listing_id, action, canonical, error in actions:
+        def _write() -> None:
+            with get_db() as db:
+                with sqlite_writer_guard(db):
+                    listing = db.get(Listing, listing_id)
+                    if listing is None:
+                        return
+                    if action == "repair":
+                        duplicate = (
+                            db.query(Listing.id)
+                            .filter(
+                                Listing.platform == "smartstore",
+                                Listing.platform_id == canonical,
+                                Listing.id != listing.id,
+                            )
+                            .first()
+                        )
+                        if not duplicate:
+                            listing.platform_id = canonical
+                            listing.error = ""
+                    else:
+                        listing.status = "stale"
+                        listing.error = error[:500]
+                    db.add(listing)
+                    db.commit()
+        retry_sqlite_write(_write, attempts=8)
 
 
 def load_price_rows(*, live: bool = True) -> list[PriceRow]:
@@ -432,12 +498,19 @@ def load_price_rows(*, live: bool = True) -> list[PriceRow]:
             by_platform["coupang"] = _fetch_coupang_prices(coupang_ids)
         if naver_ids:
             by_platform["smartstore"] = _fetch_smartstore_prices(naver_ids)
+        _reconcile_live_listing_identity(local, by_platform)
 
     rows: list[PriceRow] = []
     with get_db() as db:
         for x in local:
             remote = by_platform.get(x["platform"], {}).get(x["platform_id"], {})
-            current_price = float(remote.get("price") or x["local_price"] or 0)
+            remote_error = str(remote.get("error") or "").strip()
+            if live:
+                current_price = float(remote.get("price") or 0)
+                live_market_ok = bool(remote) and not remote_error and current_price > 0
+            else:
+                current_price = float(x["local_price"] or 0)
+                live_market_ok = current_price > 0
             category = str(remote.get("category") or x["local_category"] or "")
             fallback = (
                 policy.coupang_fallback_fee_rate
@@ -459,7 +532,7 @@ def load_price_rows(*, live: bool = True) -> list[PriceRow]:
                     policy.coupang_auto_up_pct,
                     policy.rounding_unit,
                 )
-            warning = str(remote.get("error") or "")
+            warning = remote_error
             if x["supply_price"] <= 0:
                 warning = "도매가 미확인"
             elif current_price <= 0:
@@ -467,6 +540,7 @@ def load_price_rows(*, live: bool = True) -> list[PriceRow]:
             eligible = (
                 x["supply_price"] > 0
                 and current_price > 0
+                and live_market_ok
                 and target > 0
                 and 0 <= fee < 0.60
                 and bool(x.get("supply_safe"))

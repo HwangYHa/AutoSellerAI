@@ -312,66 +312,89 @@ class SmartStoreUploader:
             return {"ok": False, "error": f"HTTP {r.status_code}: {r.text[:200]}"}
         except Exception as exc: return {"ok": False, "error": str(exc)}
 
-    def resolve_origin_product_no(self, product_no: str, *, max_pages: int = 50) -> str:
-        """Resolve either an origin-product number or SmartStore channel-product number.
+    def _search_product_identity(self, product_no: str) -> dict[str, Any]:
+        """Resolve a stored SmartStore identifier with exact official search filters.
 
-        Historical AutoSellerAI rows may contain a channelProductNo in Listing.platform_id.
-        The current Commerce API origin-product endpoints require originProductNo, so on
-        a 404 we scan the official product-search API and translate the stored identifier.
+        The Commerce API supports exact lookup by origin product number
+        (PRODUCT_NO) and channel product number (CHANNEL_PRODUCT_NO). This is more
+        reliable than scanning generic pages and also tells us when the product is
+        truly absent from the current seller catalog.
         """
         self._ensure_token()
         target = str(product_no or "").strip()
-        if not target:
-            return ""
+        if not target or not target.isdigit():
+            return {"found": False, "origin_product_no": "", "channel_product_no": "", "status": ""}
 
-        # Fast path: it is already a valid originProductNo.
-        direct = httpx.get(
-            f"{API}/v2/products/origin-products/{target}",
-            headers=self._headers(),
-            timeout=15,
+        searches = (
+            {
+                "searchKeywordType": "PRODUCT_NO",
+                "originProductNos": [int(target)],
+                "page": 1,
+                "size": 100,
+                "orderType": "NO",
+            },
+            {
+                "searchKeywordType": "CHANNEL_PRODUCT_NO",
+                "channelProductNos": [int(target)],
+                "page": 1,
+                "size": 100,
+                "orderType": "NO",
+            },
         )
-        if direct.status_code == 200:
-            return target
-        if direct.status_code not in (404,):
-            return ""
 
-        for page in range(1, max(1, int(max_pages)) + 1):
+        for body in searches:
             response = httpx.post(
                 f"{API}/v1/products/search",
                 headers=self._headers(),
-                json={"page": page, "size": 500, "orderType": "MOD_DATE"},
+                json=body,
                 timeout=30,
             )
             if response.status_code != 200:
-                return ""
+                continue
             data = response.json()
             contents = data.get("contents") or []
-            if not isinstance(contents, list) or not contents:
-                break
-
+            if not isinstance(contents, list):
+                continue
             for row in contents:
                 origin_no = str(row.get("originProductNo") or "").strip()
                 channels = row.get("channelProducts") or []
-                aliases = {origin_no}
-                aliases.update(
-                    str(channel.get(key) or "").strip()
-                    for channel in channels
-                    if isinstance(channel, dict)
-                    for key in ("originProductNo", "channelProductNo", "smartstoreChannelProductNo")
-                )
-                aliases.update(
-                    str(row.get(key) or "").strip()
-                    for key in ("channelProductNo", "smartstoreChannelProductNo")
-                )
-                aliases.discard("")
-                if target in aliases and origin_no:
-                    return origin_no
+                for channel in channels if isinstance(channels, list) else []:
+                    if not isinstance(channel, dict):
+                        continue
+                    channel_no = str(
+                        channel.get("channelProductNo")
+                        or channel.get("smartstoreChannelProductNo")
+                        or ""
+                    ).strip()
+                    channel_origin = str(channel.get("originProductNo") or origin_no).strip()
+                    aliases = {origin_no, channel_origin, channel_no}
+                    aliases.discard("")
+                    if target in aliases:
+                        return {
+                            "found": True,
+                            "origin_product_no": channel_origin or origin_no,
+                            "channel_product_no": channel_no,
+                            "status": str(channel.get("statusType") or row.get("statusType") or ""),
+                            "seller_management_code": str(channel.get("sellerManagementCode") or ""),
+                        }
 
-            total_pages = int(data.get("totalPages") or 0)
-            if data.get("last") is True or (total_pages and page >= total_pages):
-                break
-            if len(contents) < 500 and not total_pages:
-                break
+                # Some search responses can contain origin rows without a channel.
+                if target == origin_no and origin_no:
+                    return {
+                        "found": True,
+                        "origin_product_no": origin_no,
+                        "channel_product_no": "",
+                        "status": str(row.get("statusType") or ""),
+                        "seller_management_code": str(row.get("sellerManagementCode") or ""),
+                    }
+
+        return {"found": False, "origin_product_no": "", "channel_product_no": "", "status": ""}
+
+    def resolve_origin_product_no(self, product_no: str, *, max_pages: int = 50) -> str:
+        """Resolve either originProductNo or channelProductNo to originProductNo."""
+        identity = self._search_product_identity(product_no)
+        if identity.get("found"):
+            return str(identity.get("origin_product_no") or "").strip()
         return ""
 
     def _get_origin_product(self, product_no: str) -> tuple[str, dict[str, Any], str]:
@@ -381,12 +404,27 @@ class SmartStoreUploader:
         if not requested:
             return "", {}, "스마트스토어 상품번호가 비어 있습니다."
 
-        path = f"{API}/v2/products/origin-products/{requested}"
-        response = httpx.get(path, headers=self._headers(), timeout=15)
+        response = httpx.get(
+            f"{API}/v2/products/origin-products/{requested}",
+            headers=self._headers(),
+            timeout=15,
+        )
         canonical = requested
+
         if response.status_code == 404:
-            canonical = self.resolve_origin_product_no(requested)
-            if canonical and canonical != requested:
+            identity = self._search_product_identity(requested)
+            if not identity.get("found"):
+                return (
+                    requested,
+                    {},
+                    "스마트스토어 현재 상품목록에 존재하지 않는 상품입니다. "
+                    "삭제·판매종료·다른 계정 상품번호 여부를 확인하세요.",
+                )
+            status = str(identity.get("status") or "").upper()
+            canonical = str(identity.get("origin_product_no") or "").strip()
+            if status == "DELETE":
+                return canonical or requested, {}, "스마트스토어에서 삭제된 상품입니다."
+            if canonical:
                 response = httpx.get(
                     f"{API}/v2/products/origin-products/{canonical}",
                     headers=self._headers(),
@@ -425,7 +463,12 @@ class SmartStoreUploader:
         try:
             canonical, payload, error = self._get_origin_product(origin_product_no)
             if error:
-                return {"ok": False, "error": error}
+                not_found = (
+                    "현재 상품목록에 존재하지 않는 상품" in error
+                    or "삭제된 상품" in error
+                    or "존재하지 않는 상품" in error
+                )
+                return {"ok": False, "error": error, "not_found": not_found}
             origin = payload.get("originProduct") or payload
             price = int(origin.get("salePrice") or 0)
             if price <= 0:
