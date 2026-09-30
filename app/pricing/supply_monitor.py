@@ -7,6 +7,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from sqlalchemy import desc
+from sqlalchemy.exc import OperationalError
 
 from app.db import Listing, Product, SupplierRawProduct, SupplierWorkflowItem, get_db
 from app.pricing.models import (
@@ -299,7 +300,8 @@ def rebuild_supplier_mappings() -> dict[str, Any]:
     }
 
 
-def _record_refresh_failure(map_id: int, product_id: int, supplier_id: str, raw_id: str, error: str) -> None:
+def _record_refresh_failure(map_id: int, product_id: int, supplier_id: str, raw_id: str, error: str) -> bool:
+    """Best-effort failure journaling that must never crash the refresh UI."""
     def _write() -> None:
         with get_db() as db:
             with sqlite_writer_guard(db):
@@ -320,7 +322,14 @@ def _record_refresh_failure(map_id: int, product_id: int, supplier_id: str, raw_
                     )
                 )
                 db.commit()
-    retry_sqlite_write(_write, attempts=8)
+
+    try:
+        retry_sqlite_write(_write, attempts=8)
+        return True
+    except OperationalError:
+        # The primary refresh failure is already returned to the caller. A
+        # secondary audit-log contention must not replace it with a traceback.
+        return False
 
 
 def refresh_supplier_prices(*, max_items: int = 500) -> dict[str, Any]:
@@ -828,22 +837,23 @@ def persist_price_risks(rows: list[Any], target_margin_rate: float) -> dict[str,
 
         def _write() -> None:
             with get_db() as db:
-                db.add(
-                    PriceRiskSnapshot(
-                        product_id=int(row.product_id),
-                        listing_id=int(row.listing_id),
-                        platform=str(row.platform),
-                        platform_id=str(row.platform_id),
-                        supply_price=float(row.supply_price or 0),
-                        current_price=float(row.current_price or 0),
-                        fee_rate=float(row.fee_rate or 0),
-                        margin_rate=float(row.current_margin_rate or 0),
-                        target_margin_rate=float(target_margin_rate or 0),
-                        risk_level=level,
-                        reason=reason,
+                with sqlite_writer_guard(db):
+                    db.add(
+                        PriceRiskSnapshot(
+                            product_id=int(row.product_id),
+                            listing_id=int(row.listing_id),
+                            platform=str(row.platform),
+                            platform_id=str(row.platform_id),
+                            supply_price=float(row.supply_price or 0),
+                            current_price=float(row.current_price or 0),
+                            fee_rate=float(row.fee_rate or 0),
+                            margin_rate=float(row.current_margin_rate or 0),
+                            target_margin_rate=float(target_margin_rate or 0),
+                            risk_level=level,
+                            reason=reason,
+                        )
                     )
-                )
-                db.commit()
+                    db.commit()
         retry_sqlite_write(_write, attempts=8)
 
     return counts
