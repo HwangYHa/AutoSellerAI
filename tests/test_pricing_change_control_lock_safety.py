@@ -41,7 +41,7 @@ def test_apply_guarded_batch_fails_closed_when_batch_journal_is_locked():
 
 def test_rollbacks_do_not_use_nested_session_for_audit_write():
     source = inspect.getsource(change_control.rollback_change)
-    assert '_record_rollback(\n            snapshot["id"]' in source || '_record_rollback(snapshot["id"]' in source
+    assert ('_record_rollback(\n            snapshot["id"]' in source or '_record_rollback(snapshot["id"]' in source)
     assert "with get_db() as db:\n            source = db.get(PriceChangeLog" not in source
 
 
