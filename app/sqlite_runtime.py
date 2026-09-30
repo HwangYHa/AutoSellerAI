@@ -323,11 +323,10 @@ def _release_writer_lock(session: Session, *_args: Any) -> None:
 def sqlite_writer_guard(session: Session):
     """Acquire the cross-process SQLite writer mutex before read-modify-write work.
 
-    In WAL mode a transaction that starts with SELECT can fail while upgrading to
-    a writer if another process commits in between. The normal before_flush hook
-    is too late for that pattern because the read snapshot already exists. Use
-    this guard around short read-modify-write transactions so the mutex is held
-    before the first SELECT and remains held through commit or rollback.
+    The guard acquires the shared-volume POSIX writer mutex before the caller's
+    first SELECT and keeps it through commit or rollback. All ORM flushes use the
+    same mutex, so guarded read-modify-write transactions cannot race another
+    AutoSellerAI writer without adding a second SQLite-level BEGIN IMMEDIATE lock.
     """
     if session.info.get(_SESSION_LOCK_KEY) is not None:
         yield session
@@ -341,11 +340,12 @@ def sqlite_writer_guard(session: Session):
     lock_handle = _acquire_database_file_lock(database_path)
     session.info[_SESSION_LOCK_KEY] = lock_handle
     try:
-        # Reserve the SQLite writer slot before any caller SELECT. This removes
-        # WAL read-to-write upgrade races even if another component bypasses the
-        # ORM event hook. SQLAlchemy will keep this transaction until commit.
-        if not session.in_transaction():
-            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        # The cross-container POSIX flock is acquired before the caller's first
+        # SELECT and held through commit/rollback. Do not also issue
+        # BEGIN IMMEDIATE here: on SQLite it can fail solely because another
+        # connection still owns SQLite's writer slot, producing a second lock
+        # layer that defeats the application-level serialization. The global
+        # before_flush hook uses the same flock, so every ORM writer participates.
         yield session
     finally:
         # after_commit/after_rollback may already have released it.
