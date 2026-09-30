@@ -242,8 +242,8 @@ def test_writer_guard_locks_before_select_for_read_modify_write(tmp_path):
 
 
 
-def test_writer_guard_starts_begin_immediate_before_reads(tmp_path):
-    db_path = tmp_path / "begin-immediate.db"
+def test_writer_guard_does_not_add_redundant_begin_immediate(tmp_path):
+    db_path = tmp_path / "guard-no-begin-immediate.db"
     engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
     ensure_sqlite_wal(engine)
     _Base.metadata.create_all(engine)
@@ -258,12 +258,11 @@ def test_writer_guard_starts_begin_immediate_before_reads(tmp_path):
     with SessionLocal() as db:
         with sqlite_writer_guard(db):
             assert db.query(_Row).count() == 0
-            db.add(_Row(value="reserved"))
+            db.add(_Row(value="guarded"))
             db.commit()
 
-    begin_index = next(i for i, statement in enumerate(statements) if statement == "BEGIN IMMEDIATE")
-    select_index = next(i for i, statement in enumerate(statements) if statement.startswith("SELECT"))
-    assert begin_index < select_index
+    assert "BEGIN IMMEDIATE" not in statements
+    assert any(statement.startswith("INSERT") for statement in statements)
 
 
 def test_writer_lock_is_filesystem_based_without_distributed_timeout(tmp_path):
