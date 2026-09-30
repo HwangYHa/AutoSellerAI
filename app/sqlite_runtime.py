@@ -2,8 +2,8 @@
 
 AutoSellerAI runs several Docker processes against the same SQLite file
 (Streamlit, APIs, workers and schedulers). SQLite permits many readers but only
-one writer. WAL and busy_timeout reduce contention, while Redis plus a local/file
-mutex serializes ORM writers across containers that mount the same data directory.
+one writer. WAL and busy_timeout reduce contention, while a shared filesystem
+mutex serializes ORM writers across containers that mount the same native volume.
 
 ``PRAGMA journal_mode=WAL`` is database-wide, so it must not run on every pooled
 DBAPI connection. The runtime lazily enables WAL once per SQLAlchemy Engine on
@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-import hashlib
 import os
 import threading
 import time
@@ -28,10 +27,6 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.schema import MetaData
 
-try:
-    import redis  # type: ignore
-except Exception:  # pragma: no cover - dependency/runtime fallback
-    redis = None  # type: ignore
 
 try:  # Linux/Docker/CI: real cross-process locking.
     import fcntl  # type: ignore
@@ -45,8 +40,6 @@ _SCHEMA_RETRY_DELAYS = (0.05, 0.10, 0.20, 0.40, 0.80, 1.60)
 _WRITE_RETRY_DELAYS = (0.05, 0.10, 0.20, 0.40, 0.80)
 _WAL_RETRY_DELAYS = (0.10, 0.20, 0.40, 0.80, 1.60)
 _SESSION_LOCK_KEY = "_autoseller_sqlite_writer_lock"
-_REDIS_LOCK_TIMEOUT_SECONDS = 180
-_REDIS_BLOCKING_TIMEOUT_SECONDS = 60
 _installed = False
 _original_create_all = MetaData.create_all
 
@@ -57,14 +50,9 @@ _process_writer_lock = threading.RLock()
 _wal_file_lock = threading.RLock()
 _wal_init_lock = threading.Lock()
 _wal_initialized_engines: "weakref.WeakSet[Engine]" = weakref.WeakSet()
-_redis_client: Any | None = None
-_redis_client_init_attempted = False
-
-
 @dataclass
 class _WriterLockHandle:
     file_fd: int
-    redis_lock: Any | None = None
 
 
 def is_sqlite_contention_error(exc: BaseException) -> bool:
@@ -140,78 +128,30 @@ def _sqlite_database_path(session: Session) -> Path | None:
         return None
 
 
-def _get_redis_client() -> Any | None:
-    """Return the shared Redis client when Docker/runtime Redis is available.
-
-    Docker Desktop bind mounts can provide weaker advisory-file-lock semantics
-    than a native Linux filesystem. Redis therefore acts as the primary
-    cross-container writer mutex when REDIS_URL is configured; flock remains a
-    local/filesystem fallback and second line of defence.
-    """
-    global _redis_client, _redis_client_init_attempted
-    if _redis_client_init_attempted:
-        return _redis_client
-    _redis_client_init_attempted = True
-
-    redis_url = str(os.getenv("REDIS_URL") or "").strip()
-    if not redis_url or redis is None:
-        return None
-    try:
-        client = redis.Redis.from_url(
-            redis_url,
-            socket_connect_timeout=1.5,
-            socket_timeout=2.0,
-            health_check_interval=30,
-        )
-        client.ping()
-        _redis_client = client
-    except Exception:
-        _redis_client = None
-    return _redis_client
-
-
-def _redis_writer_lock(database_path: Path) -> Any | None:
-    client = _get_redis_client()
-    if client is None:
-        return None
-    digest = hashlib.sha256(str(database_path).encode("utf-8")).hexdigest()[:24]
-    return client.lock(
-        f"autoseller:sqlite-writer:{digest}",
-        timeout=_REDIS_LOCK_TIMEOUT_SECONDS,
-        blocking_timeout=_REDIS_BLOCKING_TIMEOUT_SECONDS,
-        thread_local=False,
-    )
-
-
 def _acquire_database_file_lock(database_path: Path) -> _WriterLockHandle:
-    """Acquire one writer mutex across threads, containers and the DB filesystem."""
+    """Acquire one writer mutex across threads and containers on the shared volume.
+
+    Since the SQLite database now lives on a Docker named volume, POSIX flock is
+    the reliable cross-container primitive. Redis is deliberately not used here:
+    Redis locks are lease-based and non-reentrant, so a slow/nested DB path can
+    create artificial timeouts even when SQLite itself is healthy.
+    """
     _process_writer_lock.acquire()
     lock_fd: int | None = None
-    distributed_lock: Any | None = None
     try:
-        distributed_lock = _redis_writer_lock(database_path)
-        if distributed_lock is not None:
-            acquired = bool(distributed_lock.acquire(blocking=True))
-            if not acquired:
-                raise TimeoutError("Timed out waiting for AutoSellerAI SQLite distributed writer lock.")
-
         lock_path = Path(f"{database_path}.write.lock")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
         if fcntl is not None:
+            # Blocking flock waits for the actual writer to commit/rollback.
+            # No arbitrary 60s application-level timeout is imposed.
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        return _WriterLockHandle(file_fd=lock_fd, redis_lock=distributed_lock)
+        return _WriterLockHandle(file_fd=lock_fd)
     except Exception:
         if lock_fd is not None:
             try:
                 os.close(lock_fd)
             except OSError:
-                pass
-        if distributed_lock is not None:
-            try:
-                if distributed_lock.owned():
-                    distributed_lock.release()
-            except Exception:
                 pass
         _process_writer_lock.release()
         raise
@@ -228,14 +168,6 @@ def _release_database_file_lock(lock_handle: _WriterLockHandle) -> None:
             os.close(lock_handle.file_fd)
         except OSError:
             pass
-        if lock_handle.redis_lock is not None:
-            try:
-                if lock_handle.redis_lock.owned():
-                    lock_handle.redis_lock.release()
-            except Exception:
-                # Redis loss must not strand the local mutex. The Redis lease has
-                # a finite TTL, so another process can recover even after failure.
-                pass
     finally:
         _process_writer_lock.release()
 
