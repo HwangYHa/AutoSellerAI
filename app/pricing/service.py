@@ -440,51 +440,34 @@ def _fetch_smartstore_prices(platform_ids: set[str]) -> dict[str, dict[str, Any]
     return result
 
 
-def _reconcile_live_listing_identity(local: list[dict[str, Any]], by_platform: dict[str, dict[str, dict[str, Any]]]) -> None:
-    """Repair canonical SmartStore IDs and quarantine confirmed stale listings."""
-    actions: list[tuple[int, str, str, str]] = []
-    for item in local:
-        platform = str(item.get("platform") or "")
-        platform_id = str(item.get("platform_id") or "")
-        remote = by_platform.get(platform, {}).get(platform_id, {})
-        canonical = str(remote.get("origin_product_no") or "").strip()
-        error = str(remote.get("error") or "").strip()
+def _live_listing_identity_state(
+    platform: str,
+    platform_id: str,
+    remote: dict[str, Any],
+) -> dict[str, str]:
+    """Return live identity diagnostics without mutating the database.
 
-        if platform == "smartstore" and canonical and canonical != platform_id:
-            actions.append((int(item["listing_id"]), "repair", canonical, ""))
-        elif platform == "smartstore" and (
+    Price comparison is a read operation. It must never UPDATE Listing rows as a
+    side effect, because a transient SQLite writer can otherwise make the whole
+    pricing page fail while merely loading comparison data.
+    """
+    canonical = str(remote.get("origin_product_no") or "").strip()
+    error = str(remote.get("error") or "").strip()
+    state = ""
+    if platform == "smartstore":
+        if canonical and canonical != str(platform_id or ""):
+            state = "canonical_id_recovered"
+        elif (
             "현재 상품목록에 존재하지 않는 상품" in error
             or "삭제된 상품" in error
+            or "존재하지 않는 상품" in error
         ):
-            actions.append((int(item["listing_id"]), "stale", "", error))
-
-    for listing_id, action, canonical, error in actions:
-        def _write() -> None:
-            with get_db() as db:
-                with sqlite_writer_guard(db):
-                    listing = db.get(Listing, listing_id)
-                    if listing is None:
-                        return
-                    if action == "repair":
-                        duplicate = (
-                            db.query(Listing.id)
-                            .filter(
-                                Listing.platform == "smartstore",
-                                Listing.platform_id == canonical,
-                                Listing.id != listing.id,
-                            )
-                            .first()
-                        )
-                        if not duplicate:
-                            listing.platform_id = canonical
-                            listing.error = ""
-                    else:
-                        listing.status = "stale"
-                        listing.error = error[:500]
-                    db.add(listing)
-                    db.commit()
-        retry_sqlite_write(_write, attempts=8)
-
+            state = "stale"
+    return {
+        "state": state,
+        "canonical_id": canonical,
+        "error": error,
+    }
 
 def load_price_rows(*, live: bool = True) -> list[PriceRow]:
     ensure_pricing_schema()
@@ -498,13 +481,13 @@ def load_price_rows(*, live: bool = True) -> list[PriceRow]:
             by_platform["coupang"] = _fetch_coupang_prices(coupang_ids)
         if naver_ids:
             by_platform["smartstore"] = _fetch_smartstore_prices(naver_ids)
-        _reconcile_live_listing_identity(local, by_platform)
 
     rows: list[PriceRow] = []
     with get_db() as db:
         for x in local:
             remote = by_platform.get(x["platform"], {}).get(x["platform_id"], {})
-            remote_error = str(remote.get("error") or "").strip()
+            identity = _live_listing_identity_state(x["platform"], x["platform_id"], remote)
+            remote_error = identity["error"]
             if live:
                 current_price = float(remote.get("price") or 0)
                 live_market_ok = bool(remote) and not remote_error and current_price > 0
@@ -533,6 +516,13 @@ def load_price_rows(*, live: bool = True) -> list[PriceRow]:
                     policy.rounding_unit,
                 )
             warning = remote_error
+            if identity["state"] == "stale":
+                warning = warning or "스마트스토어에서 더 이상 조회되지 않는 상품"
+            elif identity["state"] == "canonical_id_recovered":
+                warning = warning or (
+                    f"스마트스토어 원상품번호 복구됨: {identity['canonical_id']} "
+                    "· 실제 가격 변경 성공 시 로컬 ID를 자동 교정"
+                )
             if x["supply_price"] <= 0:
                 warning = "도매가 미확인"
             elif current_price <= 0:
