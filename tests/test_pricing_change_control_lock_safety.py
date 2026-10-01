@@ -58,7 +58,16 @@ def test_live_price_rows_fail_closed_on_remote_errors():
     assert "current_price = float(remote.get(\"price\") or 0)" in source
 
 
-def test_smartstore_live_reconciliation_quarantines_confirmed_stale_listings():
-    source = inspect.getsource(service._reconcile_live_listing_identity)
-    assert 'listing.status = "stale"' in source
+def test_pricing_comparison_does_not_mutate_listings_while_loading():
+    source = inspect.getsource(service.load_price_rows)
+    assert "_reconcile_live_listing_identity" not in source
+    assert 'listing.status = "stale"' not in source
+    assert "db.commit()" not in source
+
+
+def test_smartstore_identity_state_classifies_stale_without_db_write():
+    source = inspect.getsource(service._live_listing_identity_state)
+    assert '"stale"' in source
     assert "현재 상품목록에 존재하지 않는 상품" in source
+    assert "get_db" not in source
+    assert "db.commit" not in source
