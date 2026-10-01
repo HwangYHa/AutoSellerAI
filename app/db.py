@@ -595,15 +595,22 @@ _engine = None
 _SessionLocal = None
 
 
+def _database_url() -> str:
+    settings = get_settings()
+    configured = str(getattr(settings, "database_url", "") or "").strip()
+    if configured:
+        return configured
+    return f"sqlite:///{settings.db_path}"
+
+
 def _get_engine():
     global _engine
     if _engine is None:
-        s = get_settings()
-        _engine = create_engine(
-            f"sqlite:///{s.db_path}",
-            connect_args={"check_same_thread": False},
-            pool_pre_ping=True,
-        )
+        url = _database_url()
+        kwargs = {"pool_pre_ping": True}
+        if url.startswith("sqlite"):
+            kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}
+        _engine = create_engine(url, **kwargs)
     return _engine
 
 
