@@ -1,16 +1,36 @@
 services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: autoseller-postgres
+    environment:
+      POSTGRES_DB: autoseller
+      POSTGRES_USER: autoseller
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-autoseller_local}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U autoseller -d autoseller"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
   db-bootstrap:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: autoseller-db-bootstrap
-    command: ["python", "scripts/bootstrap_sqlite_volume.py"]
+    command: ["python", "scripts/migrate_sqlite_to_postgres.py"]
     volumes:
       - ./data:/legacy:ro
-      - sqlite-data:/app/sqlite
+      - sqlite-data:/sqlite:ro
     environment:
+      DATABASE_URL: postgresql+psycopg://autoseller:${POSTGRES_PASSWORD:-autoseller_local}@postgres:5432/autoseller
+      SQLITE_VOLUME_DB: /sqlite/autoseller.db
       LEGACY_DB_PATH: /legacy/autoseller.db
-      TARGET_DB_PATH: /app/sqlite/autoseller.db
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: "no"
 
   autoseller:
@@ -28,6 +48,7 @@ services:
         required: false
     environment:
       DB_PATH: /app/sqlite/autoseller.db
+      DATABASE_URL: postgresql+psycopg://autoseller:${POSTGRES_PASSWORD:-autoseller_local}@postgres:5432/autoseller
       REDIS_URL: redis://redis:6379/0
       SD_WEBUI_URL: ${SD_WEBUI_DOCKER_URL:-http://host.docker.internal:7860}
     extra_hosts:
@@ -35,6 +56,8 @@ services:
     depends_on:
       db-bootstrap:
         condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
     restart: unless-stopped
@@ -61,10 +84,13 @@ services:
         required: false
     environment:
       DB_PATH: /app/sqlite/autoseller.db
+      DATABASE_URL: postgresql+psycopg://autoseller:${POSTGRES_PASSWORD:-autoseller_local}@postgres:5432/autoseller
       REDIS_URL: redis://redis:6379/0
     depends_on:
       db-bootstrap:
         condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
     restart: unless-stopped
@@ -89,10 +115,13 @@ services:
         required: false
     environment:
       DB_PATH: /app/sqlite/autoseller.db
+      DATABASE_URL: postgresql+psycopg://autoseller:${POSTGRES_PASSWORD:-autoseller_local}@postgres:5432/autoseller
       REDIS_URL: redis://redis:6379/0
     depends_on:
       db-bootstrap:
         condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
     restart: unless-stopped
@@ -111,6 +140,7 @@ services:
         required: false
     environment:
       DB_PATH: /app/sqlite/autoseller.db
+      DATABASE_URL: postgresql+psycopg://autoseller:${POSTGRES_PASSWORD:-autoseller_local}@postgres:5432/autoseller
       REDIS_URL: redis://redis:6379/0
       SD_WEBUI_URL: ${SD_WEBUI_DOCKER_URL:-http://host.docker.internal:7860}
     extra_hosts:
@@ -118,6 +148,8 @@ services:
     depends_on:
       db-bootstrap:
         condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
     restart: unless-stopped
@@ -136,10 +168,13 @@ services:
         required: false
     environment:
       DB_PATH: /app/sqlite/autoseller.db
+      DATABASE_URL: postgresql+psycopg://autoseller:${POSTGRES_PASSWORD:-autoseller_local}@postgres:5432/autoseller
       REDIS_URL: redis://redis:6379/0
     depends_on:
       db-bootstrap:
         condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
     restart: unless-stopped
@@ -158,10 +193,13 @@ services:
         required: false
     environment:
       DB_PATH: /app/sqlite/autoseller.db
+      DATABASE_URL: postgresql+psycopg://autoseller:${POSTGRES_PASSWORD:-autoseller_local}@postgres:5432/autoseller
       REDIS_URL: redis://redis:6379/0
     depends_on:
       db-bootstrap:
         condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
     restart: unless-stopped
@@ -182,10 +220,13 @@ services:
         required: false
     environment:
       DB_PATH: /app/sqlite/autoseller.db
+      DATABASE_URL: postgresql+psycopg://autoseller:${POSTGRES_PASSWORD:-autoseller_local}@postgres:5432/autoseller
       REDIS_URL: redis://redis:6379/0
     depends_on:
       db-bootstrap:
         condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
     restart: unless-stopped
@@ -224,10 +265,13 @@ services:
         required: false
     environment:
       DB_PATH: /app/sqlite/autoseller.db
+      DATABASE_URL: postgresql+psycopg://autoseller:${POSTGRES_PASSWORD:-autoseller_local}@postgres:5432/autoseller
       REDIS_URL: redis://redis:6379/0
     depends_on:
       db-bootstrap:
         condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
     restart: unless-stopped
@@ -246,10 +290,13 @@ services:
         required: false
     environment:
       DB_PATH: /app/sqlite/autoseller.db
+      DATABASE_URL: postgresql+psycopg://autoseller:${POSTGRES_PASSWORD:-autoseller_local}@postgres:5432/autoseller
       REDIS_URL: redis://redis:6379/0
     depends_on:
       db-bootstrap:
         condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
     restart: unless-stopped
@@ -270,3 +317,4 @@ services:
 volumes:
   redis-data:
   sqlite-data:
+  postgres-data:
